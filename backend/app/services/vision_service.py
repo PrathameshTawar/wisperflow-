@@ -62,9 +62,14 @@ class VisionService:
         }
 
     def decode_image(self, image_bytes: bytes) -> np.ndarray:
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        frame = np.array(image)
-        return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        if not image_bytes:
+            raise ValueError("Empty image payload.")
+        try:
+            image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+            frame = np.array(image)
+            return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        except Exception as e:
+            raise ValueError(f"Invalid or unsupported image file: {e}")
 
     def _describe_with_vlm(
         self,
@@ -289,11 +294,43 @@ class VisionService:
 
     def detect_currency(self, frame: np.ndarray) -> Optional[Dict[str, Any]]:
         """
-        EXPERIMENTAL color-heuristic Indian Rupee (INR) estimator using the center ROI.
-        Not safe for unverified financial decisions; user must verify via tactile marks.
+        EXPERIMENTAL color-heuristic Indian Rupee (INR) estimator.
+        Requires a rectangular note-shaped edge contour (aspect ratio ~1.6-2.8)
+        and internal print detail so solid walls or colored shirts do not trigger.
         """
         h, w, _ = frame.shape
-        roi = frame[int(h * 0.25):int(h * 0.75), int(w * 0.25):int(w * 0.75)]
+        frame_area = float(h * w)
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        edges = cv2.Canny(blurred, 50, 150)
+        dilated = cv2.dilate(edges, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)), iterations=2)
+
+        contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        note_box = None
+        best_area = 0.0
+        for c in contours:
+            area = cv2.contourArea(c)
+            if area < frame_area * 0.05:
+                continue
+            peri = cv2.arcLength(c, True)
+            approx = cv2.approxPolyDP(c, 0.03 * peri, True)
+            if 4 <= len(approx) <= 6:
+                bx, by, bw, bh = cv2.boundingRect(c)
+                if bw > 0 and bh > 0:
+                    ratio = max(bw, bh) / float(min(bw, bh))
+                    if 1.6 <= ratio <= 2.8 and area > best_area:
+                        best_area = area
+                        note_box = (bx, by, bw, bh)
+
+        if not note_box:
+            return None
+
+        bx, by, bw, bh = note_box
+        roi = frame[by:by + bh, bx:bx + bw]
+        # Require printed ink detail inside the rectangle
+        if float(cv2.Laplacian(gray[by:by + bh, bx:bx + bw], cv2.CV_64F).var()) < 25.0:
+            return None
+
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         h_mean = float(np.mean(hsv[:, :, 0]))
         s_mean = float(np.mean(hsv[:, :, 1]))
@@ -317,14 +354,14 @@ class VisionService:
             return {
                 "label": detected_note,
                 "confidence": 0.65,
-                "bbox": [int(w * 0.2), int(h * 0.2), int(w * 0.8), int(h * 0.8)],
+                "bbox": [bx, by, bx + bw, by + bh],
                 "position": "directly ahead",
                 "sector": "center",
                 "proximity": "very close",
                 "is_obstacle": False,
                 "is_currency": True,
                 "experimental": True,
-                "area_ratio": 0.36
+                "area_ratio": round(float(bw * bh) / frame_area, 3)
             }
         return None
 
