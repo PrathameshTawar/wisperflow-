@@ -4,7 +4,7 @@ A voice-first accessibility prototype built for blind, low-vision, and speech-im
 
 ## Primary Flow: Drishti (दृष्टि) — Voice-First Visual Assistant
 
-- **Ask & Hear What It Sees:** Point your laptop or phone camera and hear continuous spoken descriptions every ~2.2 seconds, or ask spoken questions (*"What is in front of me?"*, *"Is there a door?"*).
+- **Ask & Hear What It Sees:** Point your laptop or phone camera and hear continuous spoken descriptions every ~5.5 seconds, or ask spoken questions (*"What is in front of me?"*, *"Is there a door?"*).
 - **Dual Vision Engine:**
   - **Vision-Language Model (Recommended):** Supports **Google Gemini (`gemini-2.5-flash`)** or **Anthropic Claude (`claude-sonnet-4-5`)** when `GEMINI_API_KEY` / `ANTHROPIC_API_KEY` is set in `backend/.env` for full scene, signboard, door, and stair descriptions.
   - **Local Offline Fallback (`YOLOv8n`):** Runs locally when no VLM key is configured (limited to 80 COCO object classes).
@@ -43,6 +43,7 @@ Measured locally on this Windows workstation (`Python 3.12.10`, CPU mode):
 ## Safety & Limitations
 
 - **Drishti is an assistance tool only:** Camera vision can miss potholes, transparent glass doors, or fast-moving vehicles. It must **never** replace a white cane, guide dog, or orientation/mobility training.
+- **Camera & Audio Privacy:** When `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, or `SARVAM_API_KEY` is configured in `backend/.env`, captured camera frames are sent to Google or Anthropic servers for scene narration, and audio clips are sent to Sarvam AI servers for speech processing. Avoid pointing the camera at sensitive documents or other people's faces while VLM mode is enabled.
 - **No external API keys committed:** Without `GEMINI_API_KEY` or `SARVAM_API_KEY` in `backend/.env`, the app runs entirely locally using `YOLOv8n` + `faster-whisper-base` + browser speech synthesis.
 
 ## Run Locally
