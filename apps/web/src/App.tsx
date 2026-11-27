@@ -58,6 +58,7 @@ interface VisionResponse {
   proximity_score?: number;
   narration: string;
   vision_engine?: string;
+  vlm_error?: string | null;
   dimensions: { width: number; height: number };
 }
 
@@ -1513,6 +1514,14 @@ export function App() {
                   </div>
                 )}
               </div>
+
+              {/* VLM Fallback Error Notice */}
+              {visionResult?.vlm_error && (
+                <div style={{ padding: '0.6rem 1.5rem', background: 'rgba(239, 68, 68, 0.12)', borderTop: '1px solid rgba(239, 68, 68, 0.35)', color: '#fca5a5', fontSize: '0.82rem' }}>
+                  <strong>VLM API Notice (fell back to YOLOv8n): </strong>
+                  <span>{visionResult.vlm_error}</span>
+                </div>
+              )}
 
               {/* OCR Entity Highlights Bar */}
               {ocrResult?.entities && (
