@@ -33,8 +33,10 @@ async def detect_sign_base64(payload: Base64SignRequest):
         img_data = payload.image_base64
         if "," in img_data:
             img_data = img_data.split(",")[1]
-        raw_bytes = base64.b64decode(img_data)
+        raw_bytes = base64.b64decode(img_data, validate=True)
         return sign_service.predict_from_image(raw_bytes)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid image data: {e}")
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Image gesture detection error: {str(e)}")
 
@@ -44,6 +46,8 @@ async def detect_sign_file(file: UploadFile = File(...)):
     try:
         contents = await file.read()
         return sign_service.predict_from_image(contents)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"File gesture processing failed: {str(e)}")
 
