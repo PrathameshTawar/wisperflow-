@@ -35,12 +35,10 @@ Measured locally on this Windows workstation (`Python 3.12.10`, CPU mode):
 | :--- | :--- | :--- |
 | **Backend Test Suite (`pytest -v`)** | **9 / 9 passed** (`13.68s`) | API routes, OCR entity parser, qualitative distance guard, WAV STT/TTS endpoints |
 | **Frontend Build (`tsc -b && vite build`)** | **0 errors** (`1.02s`) | Production TypeScript + Vite bundle |
-| **YOLOv8n Local Detection (`640×480`)** | **129.6 ms median** (`161.5 ms` p95) | 10-run benchmark via `ml/evaluation/benchmark.py` (80 COCO classes) |
-| **OpenCV Gesture Contour Demo** | **6.0 ms median** | 10-run benchmark on synthetic `640×480` skin-tone blob |
-| **Faster-Whisper-base (`int8`)** | **43.5 ms median** (2s silent VAD clip) | Model loaded locally; real spoken latency depends on utterance length |
-| **Tesseract.js OCR (34pt clean label)** | **594 ms**, 100% text match | Read `PARACETAMOL 500mg / EXP: 08/2027 / MRP Rs. 45.00`; tiny 10px print misread `Rs. 45.00` as `Fs 4500` |
+| **YOLOv8n Local Inference Latency (`640×480`)** | **129.6 ms median** (`161.5 ms` p95) | Speed-only benchmark (`ml/evaluation/benchmark.py`) on CPU; covers 80 COCO classes |
+| **Tesseract.js OCR (generated test PNGs)** | **594 ms** on 34pt label; tiny 10px print misread `Rs. 45.00` as `Fs 4500` | Synthetic test only — real medicine strip photo testing in progress via `ml/evaluation/scene_eval_log.csv` |
 
-*Planned User Evaluation Target (not yet conducted):* ≥80% completion across 20 guided accessibility tasks with ≥5 users/accessibility testers.
+*Field Evaluation (In Progress):* Logging 10 real camera scenes (desk, door, person, chair, bottle, signboard, medicine strip, etc.) in [`ml/evaluation/scene_eval_log.csv`](ml/evaluation/scene_eval_log.csv) alongside user feedback from 3–5 testers.
 
 ## Safety & Limitations
 
