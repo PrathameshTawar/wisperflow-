@@ -57,6 +57,7 @@ interface VisionResponse {
   obstacle_alert: boolean;
   proximity_score?: number;
   narration: string;
+  vision_engine?: string;
   dimensions: { width: number; height: number };
 }
 
@@ -129,6 +130,8 @@ export function App() {
   // Drishti Vision State
   const [drishtiSubMode, setDrishtiSubMode] = useState<'vision' | 'currency' | 'ocr'>('vision');
   const [autoVisionSpeak, setAutoVisionSpeak] = useState(true);
+  const [vlmProvider, setVlmProvider] = useState<string | null>(null);
+  const [visionQuestion, setVisionQuestion] = useState('');
   const [isVisionCameraActive, setIsVisionCameraActive] = useState(false);
   const [visionFacingMode, setVisionFacingMode] = useState<'user' | 'environment'>('environment');
   const [visionResult, setVisionResult] = useState<VisionResponse | null>(null);
@@ -185,11 +188,18 @@ export function App() {
       } else {
         setHealthStatus('offline');
       }
-      // Check Sarvam / Whisper Speech capabilities
-      const speechRes = await fetch('/api/speech/status');
+      // Check Sarvam / Whisper Speech & Vision VLM capabilities
+      const [speechRes, visionRes] = await Promise.all([
+        fetch('/api/speech/status'),
+        fetch('/api/vision/status')
+      ]);
       if (speechRes.ok) {
         const sData = await speechRes.json();
         setSarvamAvailable(Boolean(sData.sarvam_configured));
+      }
+      if (visionRes.ok) {
+        const vData = await visionRes.json();
+        setVlmProvider(vData.vlm_provider || null);
       }
     } catch {
       setHealthStatus('offline');
@@ -424,8 +434,8 @@ export function App() {
     setTimeout(() => startSignCamera(nextMode), 300);
   };
 
-  // Drishti YOLO & Scene/Currency Analysis
-  const captureAndAnalyzeVision = async (forceSpeak = false) => {
+  // Drishti VLM / YOLO Scene & Experimental Currency Analysis
+  const captureAndAnalyzeVision = async (forceSpeak = false, questionOverride?: string) => {
     if (!visionVideoRef.current || !isVisionCameraActive || isAnalyzingVisionRef.current) return;
     if (!visionVideoRef.current.videoWidth) return;
 
@@ -445,12 +455,18 @@ export function App() {
     ctx.drawImage(video, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
     const base64Data = hiddenCanvas.toDataURL('image/jpeg', 0.8);
     const apiMode = drishtiSubMode === 'currency' ? 'currency' : 'scene';
+    const activeQ = (questionOverride !== undefined ? questionOverride : visionQuestion).trim() || undefined;
 
     try {
       const res = await fetch('/api/vision/detect-base64', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image_base64: base64Data, mode: apiMode })
+        body: JSON.stringify({
+          image_base64: base64Data,
+          mode: apiMode,
+          question: activeQ,
+          language: selectedLang
+        })
       });
 
       if (res.ok) {
@@ -537,13 +553,43 @@ export function App() {
     });
   };
 
-  // Document & Medicine OCR Analysis
+  // Document & Medicine Reader: uses VLM when configured, or local Tesseract.js OCR fallback
   const runDocumentOCR = async (imageSource: string | File) => {
     setIsAnalyzingVision(true);
     setOcrResult(null);
     speakText("Scanning medicine or document text. Please hold steady...");
 
     try {
+      if (vlmProvider) {
+        let res: Response;
+        if (typeof imageSource === 'string') {
+          res = await fetch('/api/vision/detect-base64', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image_base64: imageSource, mode: 'ocr', language: selectedLang })
+          });
+        } else {
+          const fd = new FormData();
+          fd.append('file', imageSource);
+          fd.append('mode', 'ocr');
+          fd.append('language', selectedLang);
+          res = await fetch('/api/vision/detect', { method: 'POST', body: fd });
+        }
+        if (res.ok) {
+          const vData: VisionResponse = await res.json();
+          const summary = vData.narration || "Could not read text clearly.";
+          setOcrResult({
+            full_text: summary,
+            lines: [summary],
+            entities: {},
+            speech_summary: summary
+          });
+          speakText(summary);
+          setIsAnalyzingVision(false);
+          return;
+        }
+      }
+
       const { createWorker } = await import('tesseract.js');
       const worker = await createWorker('eng');
       const ret = await worker.recognize(imageSource);
@@ -551,12 +597,11 @@ export function App() {
 
       const extractedText = ret.data.text;
       if (!extractedText.trim()) {
-        speakText("No clear text detected. Please ensure good lighting and hold the text closer.");
+        speakText("No clear text detected. Local OCR needs flat, well-lit, large print.");
         setIsAnalyzingVision(false);
         return;
       }
 
-      // Analyze entities with backend OCR service
       const res = await fetch('/api/vision/analyze-ocr-text', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -570,7 +615,7 @@ export function App() {
       }
     } catch (err: any) {
       console.error("OCR error:", err);
-      speakText("Text scan complete. Reading text aloud.");
+      speakText("Could not complete text scan.");
     } finally {
       setIsAnalyzingVision(false);
     }
@@ -696,10 +741,11 @@ export function App() {
     if (cmd.includes('what do you see') || cmd.includes('in front') || cmd.includes('describe') || cmd.includes('kya hai') || cmd.includes('saamne') || cmd.includes('क्या है') || cmd.includes('सामने') || cmd.includes('काय आहे')) {
       setActiveTab('drishti');
       setDrishtiSubMode('vision');
+      setVisionQuestion(transcript);
       if (!isVisionCameraActive) {
         startVisionCamera();
       } else {
-        captureAndAnalyzeVision(true);
+        captureAndAnalyzeVision(true, transcript);
       }
     } else if (cmd.includes('currency') || cmd.includes('rupee') || cmd.includes('note') || cmd.includes('paisa') || cmd.includes('नोट') || cmd.includes('रुपये')) {
       setActiveTab('drishti');
@@ -707,18 +753,18 @@ export function App() {
       if (isVisionCameraActive) {
         setTimeout(() => captureAndAnalyzeVision(true), 200);
       } else {
-        speakText('Switched to Currency Reader mode.');
+        speakText('Switched to experimental currency check mode. Please verify notes by touch as well.');
       }
     } else if (cmd.includes('medicine') || cmd.includes('ocr') || cmd.includes('dawai') || cmd.includes('दवाई') || cmd.includes('पढ़ो')) {
       setActiveTab('drishti');
       setDrishtiSubMode('ocr');
-      speakText('Switched to Medicine and Document OCR mode.');
+      speakText('Switched to Medicine and Document Reader mode.');
     } else if (cmd.includes('drishti') || cmd.includes('vision') || cmd.includes('camera') || cmd.includes('eye') || cmd.includes('दृष्टि')) {
       setActiveTab('drishti');
-      speakText('Opening Drishti Vision Studio.');
-    } else if (cmd.includes('samvaad') || cmd.includes('sign') || cmd.includes('hand') || cmd.includes('संवाद') || cmd.includes('इशारा')) {
+      speakText('Opening Drishti Visual Assistant.');
+    } else if (cmd.includes('samvaad') || cmd.includes('sign') || cmd.includes('hand') || cmd.includes('gesture') || cmd.includes('संवाद') || cmd.includes('इशारा')) {
       setActiveTab('samvaad');
-      speakText('Opening Samvaad Sign Studio.');
+      speakText('Opening Samvaad 8-gesture speech demo.');
     } else if (cmd.includes('contrast')) {
       setHighContrast(prev => !prev);
       speakText('Toggled high contrast mode.');
@@ -731,6 +777,10 @@ export function App() {
       speakText('Stopped cameras.');
     } else if (cmd.includes('read') || cmd.includes('summary')) {
       speakText('SAHAAY AI platform is active and ready.');
+    } else if (activeTab === 'drishti' && isVisionCameraActive) {
+      // Any other spoken question while viewing Drishti camera asks the scene analyzer directly
+      setVisionQuestion(transcript);
+      captureAndAnalyzeVision(true, transcript);
     }
   };
 
@@ -914,6 +964,10 @@ export function App() {
     const formData = new FormData();
     formData.append('file', file);
     formData.append('mode', drishtiSubMode === 'currency' ? 'currency' : 'scene');
+    formData.append('language', selectedLang);
+    if (visionQuestion.trim()) {
+      formData.append('question', visionQuestion.trim());
+    }
     setIsAnalyzingVision(true);
 
     try {
@@ -1073,21 +1127,21 @@ export function App() {
           className={`tab-btn ${activeTab === 'drishti' ? 'active' : ''}`}
           onClick={() => {
             setActiveTab('drishti');
-            speakText("Navigated to Drishti Vision and Medicine OCR Studio.");
+            speakText("Navigated to Drishti Visual Assistant.");
           }}
         >
           <Eye size={18} />
-          <span>Drishti: Vision, OCR & Currency</span>
+          <span>Drishti: Visual Assistant</span>
         </button>
         <button 
           className={`tab-btn ${activeTab === 'samvaad' ? 'active' : ''}`}
           onClick={() => {
             setActiveTab('samvaad');
-            speakText("Navigated to Samvaad Sign Language Studio.");
+            speakText("Navigated to Samvaad 8-gesture speech demo.");
           }}
         >
           <HandMetal size={18} />
-          <span>Samvaad: Sign Sentence AI</span>
+          <span>Samvaad: Gesture Demo (8 Signs)</span>
         </button>
       </nav>
 
@@ -1098,14 +1152,14 @@ export function App() {
           <section className="hero-section">
             <div className="hero-tag">
               <Sparkles size={16} />
-              <span>Full Tier 1 Accessibility Architecture • 100/100 Production Ready</span>
+              <span>Voice-First Visual Assistant & Gesture Prototype</span>
             </div>
 
             <h2 className="hero-title">
-              Voice-First Vision, Medicine OCR & Sign Language AI
+              SAHAAY AI — Ask & Hear What Is In Front of You
             </h2>
             <p className="hero-description">
-              India's accessibility platform featuring real-time obstacle sonar alerts, banknote reader, medicine prescription OCR, and continuous ISL sentence construction.
+              A voice-first accessibility prototype featuring <strong>Drishti</strong> (live camera scene description &amp; audio proximity cues) alongside an early <strong>Samvaad</strong> 8-gesture speech demo.
             </p>
 
             {/* Voice Command Bar */}
@@ -1218,13 +1272,13 @@ export function App() {
                 {health && (
                   <div className="health-services-pills">
                     <span className="service-pill">
-                      <CheckCircle2 size={12} color="#10b981" /> Drishti Vision & OCR: Online
+                      <CheckCircle2 size={12} color="#10b981" /> Vision: {vlmProvider ? `${vlmProvider.toUpperCase()} VLM + YOLOv8n` : 'YOLOv8n Local (80 classes)'}
                     </span>
                     <span className="service-pill">
-                      <CheckCircle2 size={12} color="#10b981" /> Samvaad Sign: Online
+                      <CheckCircle2 size={12} color="#10b981" /> Samvaad: 8-Gesture Demo
                     </span>
                     <span className="service-pill">
-                      <CheckCircle2 size={12} color="#10b981" /> Speech: {sarvamAvailable ? 'Sarvam + Whisper' : 'Whisper AI (Fallback)'}
+                      <CheckCircle2 size={12} color="#10b981" /> Speech: {sarvamAvailable ? 'Sarvam AI + Whisper' : 'Whisper-base (English best)'}
                     </span>
                   </div>
                 )}
@@ -1242,14 +1296,14 @@ export function App() {
                     <Eye size={28} />
                   </div>
                   <div className="module-header">
-                    <h3 className="module-title">Drishti</h3>
-                    <div className="module-native-title">दृष्टि • AI Vision, Sonar & OCR</div>
+                    <h3 className="module-title">Drishti (Primary Flow)</h3>
+                    <div className="module-native-title">दृष्टि • Visual Assistant &amp; Audio Guidance</div>
                   </div>
                   <p className="module-description">
-                    Spatial obstacle alerts with real-time sonar beeps, Indian Rupee banknote reader, and medicine prescription OCR text reader.
+                    Continuous live camera narration ({vlmProvider ? `${vlmProvider.toUpperCase()} VLM` : 'YOLOv8n local + VLM-ready'}), spatial orientation (left / ahead / right), qualitative closeness (very close / nearby / far), sonar proximity cues, and medicine/document reading.
                   </p>
                   <button className="module-cta-btn" onClick={() => setActiveTab('drishti')}>
-                    <span>Open Drishti Studio</span>
+                    <span>Open Drishti Visual Assistant</span>
                     <ArrowRight size={16} />
                   </button>
                 </article>
@@ -1259,14 +1313,14 @@ export function App() {
                     <HandMetal size={28} />
                   </div>
                   <div className="module-header">
-                    <h3 className="module-title">Samvaad</h3>
-                    <div className="module-native-title">संवाद • Continuous ISL Sentence AI</div>
+                    <h3 className="module-title">Samvaad (Prototype Demo)</h3>
+                    <div className="module-native-title">संवाद • Gesture-to-Speech (8 Sample Gestures)</div>
                   </div>
                   <p className="module-description">
-                    Camera hand-sign tracking assembling continuous gesture sequences into natural conversational sentences with speech.
+                    Experimental OpenCV hand-contour prototype mapping 8 sample hand gestures into bilingual Hindi &amp; English speech (not full ISL grammar).
                   </p>
                   <button className="module-cta-btn" onClick={() => setActiveTab('samvaad')}>
-                    <span>Open Samvaad Studio</span>
+                    <span>Open 8-Gesture Demo</span>
                     <ArrowRight size={16} />
                   </button>
                 </article>
@@ -1283,8 +1337,10 @@ export function App() {
                 <div className="studio-title-area">
                   <Eye size={24} color="var(--accent-cyan)" />
                   <div>
-                    <h2 style={{ fontSize: '1.25rem', fontWeight: 700 }}>Drishti AI Studio</h2>
-                    <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>Obstacle Sonar, Currency Identifier & Medicine OCR</div>
+                    <h2 style={{ fontSize: '1.25rem', fontWeight: 700 }}>Drishti Visual Assistant</h2>
+                    <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                      Engine: {visionResult?.vision_engine || (vlmProvider ? `${vlmProvider.toUpperCase()} VLM + YOLOv8n` : 'YOLOv8n Local (80 classes — add GEMINI_API_KEY for full scene narration)')}
+                    </div>
                   </div>
                 </div>
 
@@ -1305,22 +1361,22 @@ export function App() {
                     className={`icon-btn ${drishtiSubMode === 'currency' ? 'active' : ''}`}
                     onClick={() => {
                       setDrishtiSubMode('currency');
-                      speakText("Switched to Indian Currency Reader mode.");
+                      speakText("Switched to experimental currency check mode. Please verify notes by touch as well.");
                     }}
                   >
                     <Sparkles size={16} />
-                    <span>Currency</span>
+                    <span>Currency (Experimental)</span>
                   </button>
 
                   <button 
                     className={`icon-btn ${drishtiSubMode === 'ocr' ? 'active' : ''}`}
                     onClick={() => {
                       setDrishtiSubMode('ocr');
-                      speakText("Switched to Medicine and Document Reader Mode.");
+                      speakText("Switched to Document and Label Reader mode.");
                     }}
                   >
                     <FileText size={16} />
-                    <span>Medicine & OCR</span>
+                    <span>Read Label / OCR</span>
                   </button>
 
                   {isVisionCameraActive && drishtiSubMode !== 'ocr' && (
@@ -1379,6 +1435,38 @@ export function App() {
                   <strong>Safety Boundary:</strong> Drishti is an AI assistance tool only. It can miss moving vehicles, potholes, or transparent objects—never use it as a replacement for a white cane, guide dog, or mobility training.
                 </span>
               </div>
+
+              {/* Experimental Currency Warning */}
+              {drishtiSubMode === 'currency' && (
+                <div
+                  role="alert"
+                  style={{
+                    padding: '0.65rem 1.5rem',
+                    background: 'rgba(239, 68, 68, 0.14)',
+                    borderBottom: '1px solid rgba(239, 68, 68, 0.4)',
+                    color: '#fecaca',
+                    fontSize: '0.85rem'
+                  }}
+                >
+                  <strong>Experimental Warning:</strong> Color-based currency guessing is unreliable under varied lighting and can misidentify ₹10/₹50/₹500 notes. Never rely on this alone for money—verify by tactile markings or human assistance.
+                </div>
+              )}
+
+              {/* OCR Limitation Notice */}
+              {drishtiSubMode === 'ocr' && !vlmProvider && (
+                <div
+                  role="note"
+                  style={{
+                    padding: '0.65rem 1.5rem',
+                    background: 'rgba(6, 182, 212, 0.1)',
+                    borderBottom: '1px solid rgba(6, 182, 212, 0.3)',
+                    color: '#a5f3fc',
+                    fontSize: '0.85rem'
+                  }}
+                >
+                  <strong>OCR Notice:</strong> Running local Tesseract.js OCR (no VLM key set). Works best on large, flat, well-lit text; small print (like prices or foil strips) may misread—always inspect raw lines below.
+                </div>
+              )}
 
               {/* Camera Error Alert */}
               {visionCameraError && (
@@ -1456,6 +1544,14 @@ export function App() {
                 </div>
               )}
 
+              {/* Raw OCR Text Verification Box */}
+              {ocrResult?.full_text && (
+                <div style={{ padding: '0.75rem 1.75rem', background: 'rgba(255,255,255,0.03)', borderTop: '1px solid var(--border-color)', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                  <strong>Raw Scanned Text: </strong>
+                  <span style={{ fontFamily: 'monospace' }}>{ocrResult.full_text}</span>
+                </div>
+              )}
+
               {/* Voice Narration Output Bar */}
               {(visionResult || ocrResult) && (
                 <div className="narration-box" role="status">
@@ -1464,6 +1560,34 @@ export function App() {
                     <strong>Voice Guidance: </strong>
                     <span>{ocrResult?.speech_summary || visionResult?.narration}</span>
                   </div>
+                </div>
+              )}
+
+              {/* Optional Question Input for VLM Scene QA */}
+              {drishtiSubMode === 'vision' && (
+                <div style={{ padding: '0.75rem 1.75rem', borderTop: '1px solid var(--border-color)', display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center', background: 'rgba(255,255,255,0.01)' }}>
+                  <input
+                    type="text"
+                    value={visionQuestion}
+                    onChange={(e) => setVisionQuestion(e.target.value)}
+                    placeholder="Ask a question about the scene (e.g. 'Is there a door?' or 'Read that sign')..."
+                    aria-label="Ask a question about what the camera sees"
+                    style={{
+                      flex: 1,
+                      minWidth: '220px',
+                      padding: '0.55rem 0.85rem',
+                      borderRadius: '8px',
+                      border: '1px solid var(--border-color)',
+                      background: 'rgba(15, 23, 42, 0.7)',
+                      color: '#fff',
+                      fontSize: '0.9rem'
+                    }}
+                  />
+                  {visionQuestion && (
+                    <button className="icon-btn" onClick={() => setVisionQuestion('')}>
+                      Clear
+                    </button>
+                  )}
                 </div>
               )}
 
@@ -1544,8 +1668,8 @@ export function App() {
                 <div className="studio-title-area">
                   <HandMetal size={24} color="#ec4899" />
                   <div>
-                    <h2 style={{ fontSize: '1.25rem', fontWeight: 700 }}>Samvaad Sign Sentence Studio</h2>
-                    <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>Continuous Gesture Recording & Conversational Sentences</div>
+                    <h2 style={{ fontSize: '1.25rem', fontWeight: 700 }}>Samvaad Gesture-to-Speech Demo</h2>
+                    <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>8 Sample Hand Gestures via OpenCV Contour Finger-Counting (Not Full ISL)</div>
                   </div>
                 </div>
 
@@ -1569,6 +1693,20 @@ export function App() {
                     </button>
                   )}
                 </div>
+              </div>
+
+              {/* Honest Demo Scope Banner */}
+              <div
+                role="note"
+                style={{
+                  padding: '0.6rem 1.5rem',
+                  background: 'rgba(236, 72, 153, 0.1)',
+                  borderBottom: '1px solid rgba(236, 72, 153, 0.3)',
+                  color: '#fbcfe8',
+                  fontSize: '0.85rem'
+                }}
+              >
+                <strong>Demo Scope Notice:</strong> This is a gesture-to-speech prototype recognizing 8 simple sample hand poses (open palm, V-sign, fist, etc.) via OpenCV contour defects—it is not full Indian Sign Language (ISL) grammar.
               </div>
 
               {/* Sign Camera Error Alert */}
@@ -1707,9 +1845,9 @@ export function App() {
                 </div>
               </div>
 
-              {/* ISL Quick Test Simulator */}
+              {/* Quick Test Simulator */}
               <div style={{ padding: '1.25rem 1.5rem 0.5rem', fontWeight: 600, fontSize: '0.95rem' }}>
-                Tap to Compose Multi-Sign Sentences (e.g. NAMASTE + HELP, or WATER + HELP):
+                Tap to Test Sample Gesture Pairs (e.g. NAMASTE + HELP, or WATER + HELP):
               </div>
               <div className="vocab-cards-grid">
                 {[
@@ -1741,8 +1879,8 @@ export function App() {
 
       {/* Footer */}
       <footer className="app-footer" role="contentinfo">
-        <p>SAHAAY AI — Built with FastAPI, PyTorch, Ultralytics YOLOv8, OpenCV, Tesseract OCR, React & TypeScript</p>
-        <p style={{ marginTop: '0.25rem' }}>E:\sahaay-ai • 100/100 Production Accessibility Platform</p>
+        <p>SAHAAY AI — FastAPI, PyTorch, YOLOv8n, OpenCV, Faster-Whisper / Sarvam AI, Tesseract.js, React & TypeScript</p>
+        <p style={{ marginTop: '0.25rem' }}>Assistance prototype only — not a substitute for mobility aids or professional interpreters</p>
       </footer>
     </div>
   );
