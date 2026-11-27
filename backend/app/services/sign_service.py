@@ -6,7 +6,7 @@ from typing import Dict, Any, List, Optional
 
 class SignService:
     def __init__(self):
-        # Known Indian Sign Language (ISL) dictionary
+        # 8 sample hand gestures for the gesture-to-speech prototype (not full ISL)
         self.vocabulary = {
             "NAMASTE": {
                 "phrase_en": "Namaste / Hello",
@@ -93,8 +93,8 @@ class SignService:
 
     def predict_from_image(self, image_bytes: bytes) -> Dict[str, Any]:
         """
-        Analyzes a camera image frame to detect hands and classify Indian Sign Language
-        gestures using skin-color segmentation, contour convex hull, and defect geometry.
+        Gesture-to-speech prototype: detects hand contour and counts convexity defects
+        (extended fingers) to map to 8 sample gestures. Not full ISL grammar.
         """
         frame = self.decode_image(image_bytes)
         height, width, _ = frame.shape
