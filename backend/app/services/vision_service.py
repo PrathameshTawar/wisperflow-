@@ -102,7 +102,8 @@ class VisionService:
 
         if provider == "gemini":
             api_key = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or settings.GEMINI_API_KEY or "").strip()
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+            env_model = (os.getenv("GEMINI_MODEL") or "").strip()
+            models_to_try = [env_model] if env_model else ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
             payload = {
                 "contents": [{
                     "parts": [
@@ -112,51 +113,62 @@ class VisionService:
                 }],
                 "generationConfig": {"temperature": 0.2, "maxOutputTokens": 180}
             }
-            try:
-                with httpx.Client(timeout=15.0) as client:
-                    resp = client.post(url, json=payload)
-                    resp.raise_for_status()
-                    data = resp.json()
-                candidates = data.get("candidates") or []
-                if candidates:
-                    parts = candidates[0].get("content", {}).get("parts", [])
-                    text = " ".join(p.get("text", "") for p in parts).strip()
-                    if text:
-                        return {"text": text, "engine": "gemini-2.5-flash"}
-            except Exception as e:
-                print(f"Drishti Gemini VLM error, falling back to YOLOv8n: {e}")
+            last_err = None
+            for model_name in models_to_try:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+                try:
+                    with httpx.Client(timeout=15.0) as client:
+                        resp = client.post(url, json=payload)
+                        resp.raise_for_status()
+                        data = resp.json()
+                    candidates = data.get("candidates") or []
+                    if candidates:
+                        parts = candidates[0].get("content", {}).get("parts", [])
+                        text = " ".join(p.get("text", "") for p in parts).strip()
+                        if text:
+                            return {"text": text, "engine": model_name}
+                except Exception as e:
+                    last_err = f"{model_name}: {e}"
+                    print(f"Drishti Gemini VLM error ({model_name}): {e}")
+            return {"text": "", "engine": "yolov8n-local", "error": last_err}
 
         elif provider == "anthropic":
             api_key = (os.getenv("ANTHROPIC_API_KEY") or settings.ANTHROPIC_API_KEY or "").strip()
-            try:
-                with httpx.Client(timeout=15.0) as client:
-                    resp = client.post(
-                        "https://api.anthropic.com/v1/messages",
-                        headers={
-                            "x-api-key": api_key,
-                            "anthropic-version": "2023-06-01",
-                            "content-type": "application/json"
-                        },
-                        json={
-                            "model": "claude-sonnet-4-5",
-                            "max_tokens": 180,
-                            "messages": [{
-                                "role": "user",
-                                "content": [
-                                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64_img}},
-                                    {"type": "text", "text": prompt}
-                                ]
-                            }]
-                        }
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
-                blocks = data.get("content") or []
-                text = " ".join(b.get("text", "") for b in blocks if b.get("type") == "text").strip()
-                if text:
-                    return {"text": text, "engine": "anthropic-claude"}
-            except Exception as e:
-                print(f"Drishti Claude VLM error, falling back to YOLOv8n: {e}")
+            env_model = (os.getenv("ANTHROPIC_MODEL") or "").strip()
+            models_to_try = [env_model] if env_model else ["claude-sonnet-4-5", "claude-3-5-sonnet-latest", "claude-3-5-haiku-latest"]
+            last_err = None
+            for model_name in models_to_try:
+                try:
+                    with httpx.Client(timeout=15.0) as client:
+                        resp = client.post(
+                            "https://api.anthropic.com/v1/messages",
+                            headers={
+                                "x-api-key": api_key,
+                                "anthropic-version": "2023-06-01",
+                                "content-type": "application/json"
+                            },
+                            json={
+                                "model": model_name,
+                                "max_tokens": 180,
+                                "messages": [{
+                                    "role": "user",
+                                    "content": [
+                                        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64_img}},
+                                        {"type": "text", "text": prompt}
+                                    ]
+                                }]
+                            }
+                        )
+                        resp.raise_for_status()
+                        data = resp.json()
+                    blocks = data.get("content") or []
+                    text = " ".join(b.get("text", "") for b in blocks if b.get("type") == "text").strip()
+                    if text:
+                        return {"text": text, "engine": model_name}
+                except Exception as e:
+                    last_err = f"{model_name}: {e}"
+                    print(f"Drishti Claude VLM error ({model_name}): {e}")
+            return {"text": "", "engine": "yolov8n-local", "error": last_err}
 
         return None
 
@@ -247,10 +259,13 @@ class VisionService:
 
         # 3. Try Vision-Language Model (full scene, signboard & question answering) if API key present
         vlm_res = self._describe_with_vlm(frame, question=question, language=language, mode=mode)
-        if vlm_res:
+        vlm_error = None
+        if vlm_res and vlm_res.get("text"):
             narration = vlm_res["text"]
             vision_engine = vlm_res["engine"]
         else:
+            if vlm_res and vlm_res.get("error"):
+                vlm_error = vlm_res["error"]
             narration = self._generate_narration(detections, mode="scene", is_dark=is_dark)
             vision_engine = "yolov8n-local"
 
@@ -267,6 +282,7 @@ class VisionService:
             "proximity_score": round(max_proximity_score, 2),
             "narration": narration,
             "vision_engine": vision_engine,
+            "vlm_error": vlm_error,
             "is_dark": is_dark,
             "dimensions": {"width": width, "height": height}
         }
