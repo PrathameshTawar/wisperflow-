@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   Eye, 
   HandMetal, 
@@ -143,12 +143,16 @@ export function App() {
   const visionCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const isAnalyzingVisionRef = useRef(false);
   const lastSpokenVisionRef = useRef<{ text: string; time: number }>({ text: '', time: 0 });
+  const pendingVisionStartRef = useRef(false);
+  const visionQuestionRef = useRef('');
+  const selectedLangRef = useRef('en');
 
   // Samvaad Sign State
   const [isSignCameraActive, setIsSignCameraActive] = useState(false);
   const [signFacingMode, setSignFacingMode] = useState<'user' | 'environment'>('user');
   const [signResult, setSignResult] = useState<SignPrediction | null>(null);
   const [gestureSequence, setGestureSequence] = useState<string[]>([]);
+  const gestureSequenceRef = useRef<string[]>([]);
   const [composedSentence, setComposedSentence] = useState<{ en: string; hi: string } | null>(null);
   const [isAnalyzingSign, setIsAnalyzingSign] = useState(false);
   const [signCameraError, setSignCameraError] = useState<string | null>(null);
@@ -157,6 +161,14 @@ export function App() {
   const signVideoRef = useRef<HTMLVideoElement | null>(null);
   const signCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const signIntervalRef = useRef<any>(null);
+
+  useEffect(() => {
+    visionQuestionRef.current = visionQuestion;
+  }, [visionQuestion]);
+
+  useEffect(() => {
+    selectedLangRef.current = selectedLang;
+  }, [selectedLang]);
 
   // Accessibility Modes
   useEffect(() => {
@@ -176,8 +188,7 @@ export function App() {
   }, [largeFont]);
 
   // Fetch Health Check from Backend
-  const checkHealth = async () => {
-    setHealthStatus('loading');
+  const fetchSystemStatus = useCallback(async () => {
     const startTime = performance.now();
     try {
       const response = await fetch('/api/health');
@@ -189,7 +200,6 @@ export function App() {
       } else {
         setHealthStatus('offline');
       }
-      // Check Sarvam / Whisper Speech & Vision VLM capabilities
       const [speechRes, visionRes] = await Promise.all([
         fetch('/api/speech/status'),
         fetch('/api/vision/status')
@@ -206,17 +216,36 @@ export function App() {
       setHealthStatus('offline');
       setHealth(null);
     }
+  }, []);
+
+  const checkHealth = () => {
+    setHealthStatus('loading');
+    void fetchSystemStatus();
   };
 
   useEffect(() => {
-    checkHealth();
-    const interval = setInterval(checkHealth, 15000);
-    return () => clearInterval(interval);
-  }, []);
+    let cancelled = false;
+    const init = async () => {
+      if (!cancelled) await fetchSystemStatus();
+    };
+    void init();
+    const interval = setInterval(() => {
+      void fetchSystemStatus();
+    }, 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [fetchSystemStatus]);
 
   // Web Audio Sonar Proximity Beep Generator for the Blind
-  const playSonarBeep = (proximityScore: number) => {
-    if (!sonarBeepEnabled || proximityScore <= 0.05) return;
+  const sonarBeepEnabledRef = useRef(true);
+  useEffect(() => {
+    sonarBeepEnabledRef.current = sonarBeepEnabled;
+  }, [sonarBeepEnabled]);
+
+  const playSonarBeep = useCallback((proximityScore: number) => {
+    if (!sonarBeepEnabledRef.current || proximityScore <= 0.05) return;
 
     try {
       if (!audioCtxRef.current) {
@@ -254,9 +283,14 @@ export function App() {
     } catch (e) {
       console.warn("Sonar audio unavailable:", e);
     }
-  };
+  }, []);
 
   // Voice Readout Helper (Sarvam AI Bulbul Anushka when key set, with Browser TTS fallback)
+  const sarvamAvailableRef = useRef(false);
+  useEffect(() => {
+    sarvamAvailableRef.current = sarvamAvailable;
+  }, [sarvamAvailable]);
+
   const speakBrowserFallback = (text: string, speechCode = 'en-IN') => {
     if ('speechSynthesis' in window) {
       window.speechSynthesis.cancel();
@@ -268,11 +302,10 @@ export function App() {
     }
   };
 
-  const speakText = async (text: string) => {
+  const speakText = useCallback(async (text: string) => {
     if (!text) return;
     setVoiceAnnouncement(text);
 
-    // Stop any previous browser or Sarvam audio
     if (currentAudioRef.current) {
       currentAudioRef.current.pause();
       currentAudioRef.current = null;
@@ -282,9 +315,9 @@ export function App() {
       window.speechSynthesis.cancel();
     }
 
-    const langConfig = LANGUAGES.find(l => l.code === selectedLang) || LANGUAGES[0];
+    const langConfig = LANGUAGES.find(l => l.code === selectedLangRef.current) || LANGUAGES[0];
 
-    if (sarvamAvailable) {
+    if (sarvamAvailableRef.current) {
       try {
         isSarvamSpeakingRef.current = true;
         const res = await fetch('/api/speech/tts', {
@@ -320,7 +353,7 @@ export function App() {
     }
 
     speakBrowserFallback(text, langConfig.speechCode);
-  };
+  }, []);
 
   // Camera Stream Request
   const requestCameraStream = async (facing: 'user' | 'environment') => {
@@ -343,7 +376,7 @@ export function App() {
   };
 
   // Drishti Camera Management
-  const startVisionCamera = async (facing = visionFacingMode) => {
+  const startVisionCamera = useCallback(async (facing = visionFacingMode) => {
     setVisionCameraError(null);
     try {
       const stream = await requestCameraStream(facing);
@@ -352,6 +385,9 @@ export function App() {
         await visionVideoRef.current.play();
         setIsVisionCameraActive(true);
         speakText('Camera activated for Drishti Vision.');
+      } else {
+        // Component unmounted before getUserMedia resolved; prevent stream leak
+        stream.getTracks().forEach(t => t.stop());
       }
     } catch (err: any) {
       console.error("Camera error:", err);
@@ -368,9 +404,9 @@ export function App() {
       setVisionCameraError(msg);
       speakText(msg);
     }
-  };
+  }, [visionFacingMode, speakText]);
 
-  const stopVisionCamera = () => {
+  const stopVisionCamera = useCallback((silent = false) => {
     if (visionVideoRef.current && visionVideoRef.current.srcObject) {
       const stream = visionVideoRef.current.srcObject as MediaStream;
       stream.getTracks().forEach(t => t.stop());
@@ -378,13 +414,13 @@ export function App() {
     }
     setIsVisionCameraActive(false);
     setVisionResult(null);
-    speakText('Drishti camera stopped.');
-  };
+    if (!silent) speakText('Drishti camera stopped.');
+  }, [speakText]);
 
   const flipVisionCamera = async () => {
     const nextMode = visionFacingMode === 'environment' ? 'user' : 'environment';
     setVisionFacingMode(nextMode);
-    stopVisionCamera();
+    stopVisionCamera(true);
     setTimeout(() => startVisionCamera(nextMode), 300);
   };
 
@@ -397,7 +433,9 @@ export function App() {
         signVideoRef.current.srcObject = stream;
         await signVideoRef.current.play();
         setIsSignCameraActive(true);
-        speakText('Camera activated for Samvaad Sign Language.');
+        speakText('Camera activated for Samvaad gesture demo.');
+      } else {
+        stream.getTracks().forEach(t => t.stop());
       }
     } catch (err: any) {
       console.error("Sign camera error:", err);
@@ -406,13 +444,15 @@ export function App() {
         msg = "Mobile live video is blocked by browser security over HTTP. Tap 'Snap Hand Photo with Phone' below to take a photo directly!";
       } else if (err.name === 'NotAllowedError') {
         msg = "Camera permission was denied. Please allow camera access in your browser.";
+      } else if (err.name === 'NotReadableError') {
+        msg = "Camera is already in use by another app. Please close other camera apps and retry.";
       }
       setSignCameraError(msg);
       speakText(msg);
     }
   };
 
-  const stopSignCamera = () => {
+  const stopSignCamera = useCallback((silent = false) => {
     if (signIntervalRef.current) {
       clearInterval(signIntervalRef.current);
       signIntervalRef.current = null;
@@ -425,101 +465,36 @@ export function App() {
     }
     setIsSignCameraActive(false);
     setSignResult(null);
-    speakText('Sign language camera stopped.');
-  };
+    if (!silent) speakText('Gesture camera stopped.');
+  }, [speakText]);
 
   const flipSignCamera = async () => {
     const nextMode = signFacingMode === 'user' ? 'environment' : 'user';
     setSignFacingMode(nextMode);
-    stopSignCamera();
+    stopSignCamera(true);
     setTimeout(() => startSignCamera(nextMode), 300);
   };
 
-  // Drishti VLM / YOLO Scene & Experimental Currency Analysis
-  const captureAndAnalyzeVision = async (forceSpeak = false, questionOverride?: string) => {
-    if (!visionVideoRef.current || !isVisionCameraActive || isAnalyzingVisionRef.current) return;
-    if (!visionVideoRef.current.videoWidth) return;
-
-    isAnalyzingVisionRef.current = true;
-    setIsAnalyzingVision(true);
-    const video = visionVideoRef.current;
-    const hiddenCanvas = document.createElement('canvas');
-    hiddenCanvas.width = video.videoWidth || 640;
-    hiddenCanvas.height = video.videoHeight || 480;
-    const ctx = hiddenCanvas.getContext('2d');
-    if (!ctx) {
-      isAnalyzingVisionRef.current = false;
-      setIsAnalyzingVision(false);
-      return;
+  // Clean tab switcher: stops active camera tracks when leaving a tab to avoid hardware locks
+  const switchTab = (nextTab: 'overview' | 'drishti' | 'samvaad') => {
+    if (nextTab !== 'drishti' && isVisionCameraActive) {
+      stopVisionCamera(true);
     }
-
-    ctx.drawImage(video, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
-    const base64Data = hiddenCanvas.toDataURL('image/jpeg', 0.8);
-    const apiMode = drishtiSubMode === 'currency' ? 'currency' : 'scene';
-    const activeQ = (questionOverride !== undefined ? questionOverride : visionQuestion).trim() || undefined;
-
-    try {
-      const res = await fetch('/api/vision/detect-base64', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          image_base64: base64Data,
-          mode: apiMode,
-          question: activeQ,
-          language: selectedLang
-        })
-      });
-
-      if (res.ok) {
-        const data: VisionResponse = await res.json();
-        setVisionResult(data);
-        drawVisionBoxes(data.detections, hiddenCanvas.width, hiddenCanvas.height);
-
-        if (data.proximity_score) {
-          playSonarBeep(data.proximity_score);
-        }
-
-        if (data.narration) {
-          const now = Date.now();
-          const last = lastSpokenVisionRef.current;
-          const isSpeaking = isSarvamSpeakingRef.current || ('speechSynthesis' in window && window.speechSynthesis.speaking);
-          const changed = data.narration !== last.text;
-          const cooldownPassed = now - last.time > 7000;
-
-          if (forceSpeak || (!isSpeaking && (changed || cooldownPassed))) {
-            speakText(data.narration);
-            lastSpokenVisionRef.current = { text: data.narration, time: now };
-          }
-        }
-      }
-    } catch (e) {
-      console.error("Vision analysis failed", e);
-    } finally {
-      isAnalyzingVisionRef.current = false;
-      setIsAnalyzingVision(false);
+    if (nextTab !== 'samvaad' && isSignCameraActive) {
+      stopSignCamera(true);
     }
+    setActiveTab(nextTab);
   };
 
-  // Automatic Continuous See & Speak Loop when Drishti Camera is Active
+  // Start Drishti camera automatically after tab mounts if triggered via voice from Overview
   useEffect(() => {
-    if (!isVisionCameraActive || !autoVisionSpeak || drishtiSubMode === 'ocr') return;
+    if (activeTab === 'drishti' && pendingVisionStartRef.current) {
+      pendingVisionStartRef.current = false;
+      void startVisionCamera();
+    }
+  }, [activeTab, startVisionCamera]);
 
-    // Run once shortly after camera starts, then every 2.2s
-    const initialTimer = setTimeout(() => {
-      captureAndAnalyzeVision(true);
-    }, 600);
-
-    const interval = setInterval(() => {
-      captureAndAnalyzeVision(false);
-    }, 2200);
-
-    return () => {
-      clearTimeout(initialTimer);
-      clearInterval(interval);
-    };
-  }, [isVisionCameraActive, autoVisionSpeak, drishtiSubMode]);
-
-  const drawVisionBoxes = (detections: Detection[], origW: number, origH: number) => {
+  const drawVisionBoxes = useCallback((detections: Detection[], origW: number, origH: number) => {
     const canvas = visionCanvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
@@ -552,7 +527,90 @@ export function App() {
       ctx.fillStyle = '#ffffff';
       ctx.fillText(labelText, rx + 6, Math.max(16, ry - 7));
     });
-  };
+  }, []);
+
+  // Drishti VLM / YOLO Scene & Experimental Currency Analysis
+  const captureAndAnalyzeVision = useCallback(async (forceSpeak = false, questionOverride?: string) => {
+    if (!visionVideoRef.current || !isVisionCameraActive || isAnalyzingVisionRef.current) return;
+    if (!visionVideoRef.current.videoWidth) return;
+
+    isAnalyzingVisionRef.current = true;
+    setIsAnalyzingVision(true);
+    const video = visionVideoRef.current;
+    const hiddenCanvas = document.createElement('canvas');
+    hiddenCanvas.width = video.videoWidth || 640;
+    hiddenCanvas.height = video.videoHeight || 480;
+    const ctx = hiddenCanvas.getContext('2d');
+    if (!ctx) {
+      isAnalyzingVisionRef.current = false;
+      setIsAnalyzingVision(false);
+      return;
+    }
+
+    ctx.drawImage(video, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
+    const base64Data = hiddenCanvas.toDataURL('image/jpeg', 0.8);
+    const apiMode = drishtiSubMode === 'currency' ? 'currency' : 'scene';
+    const activeQ = (questionOverride !== undefined ? questionOverride : visionQuestionRef.current).trim() || undefined;
+
+    try {
+      const res = await fetch('/api/vision/detect-base64', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          image_base64: base64Data,
+          mode: apiMode,
+          question: activeQ,
+          language: selectedLangRef.current
+        })
+      });
+
+      if (res.ok) {
+        const data: VisionResponse = await res.json();
+        setVisionResult(data);
+        drawVisionBoxes(data.detections, hiddenCanvas.width, hiddenCanvas.height);
+
+        if (data.proximity_score) {
+          playSonarBeep(data.proximity_score);
+        }
+
+        if (data.narration) {
+          const now = Date.now();
+          const last = lastSpokenVisionRef.current;
+          const isSpeaking = isSarvamSpeakingRef.current || ('speechSynthesis' in window && window.speechSynthesis.speaking);
+          const changed = data.narration !== last.text;
+          const cooldownPassed = now - last.time > 7000;
+
+          if (forceSpeak || (!isSpeaking && (changed || cooldownPassed))) {
+            speakText(data.narration);
+            lastSpokenVisionRef.current = { text: data.narration, time: now };
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Vision analysis failed", e);
+    } finally {
+      isAnalyzingVisionRef.current = false;
+      setIsAnalyzingVision(false);
+    }
+  }, [isVisionCameraActive, drishtiSubMode, drawVisionBoxes, speakText, playSonarBeep]);
+
+  // Automatic Continuous See & Speak Loop when Drishti Camera is Active
+  useEffect(() => {
+    if (!isVisionCameraActive || !autoVisionSpeak || drishtiSubMode === 'ocr') return;
+
+    const initialTimer = setTimeout(() => {
+      void captureAndAnalyzeVision(true);
+    }, 600);
+
+    const interval = setInterval(() => {
+      void captureAndAnalyzeVision(false);
+    }, 2200);
+
+    return () => {
+      clearTimeout(initialTimer);
+      clearInterval(interval);
+    };
+  }, [isVisionCameraActive, autoVisionSpeak, drishtiSubMode, captureAndAnalyzeVision]);
 
   // Document & Medicine Reader: uses VLM when configured, or local Tesseract.js OCR fallback
   const runDocumentOCR = async (imageSource: string | File) => {
@@ -665,25 +723,26 @@ export function App() {
   };
 
   const handleNewRecognizedSign = async (gestureKey: string) => {
-    setGestureSequence(prev => {
-      const updated = prev[prev.length - 1] === gestureKey ? prev : [...prev, gestureKey];
-      // Keep last 4 gestures
-      const trimmed = updated.slice(-4);
-      // Fetch assembled sentence
-      fetch('/api/sign/sequence-sentence', {
+    const prev = gestureSequenceRef.current;
+    const updated = prev[prev.length - 1] === gestureKey ? prev : [...prev, gestureKey];
+    const trimmed = updated.slice(-4);
+    gestureSequenceRef.current = trimmed;
+    setGestureSequence(trimmed);
+
+    try {
+      const r = await fetch('/api/sign/sequence-sentence', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ gestures: trimmed })
-      })
-      .then(r => r.json())
-      .then(sent => {
+      });
+      if (r.ok) {
+        const sent = await r.json();
         setComposedSentence({ en: sent.sentence_en, hi: sent.sentence_hi });
         speakText(`${sent.sentence_en}. Hindi: ${sent.sentence_hi}`);
-      })
-      .catch(console.error);
-
-      return trimmed;
-    });
+      }
+    } catch (e) {
+      console.error(e);
+    }
   };
 
   const drawSignBox = (data: SignPrediction, origW: number, origH: number) => {
@@ -709,7 +768,7 @@ export function App() {
       ctx.lineWidth = 4;
       ctx.strokeRect(rx, ry, rw, rh);
 
-      const labelText = `ISL Sign: ${data.phrase_en} (${Math.round(data.confidence * 100)}%)`;
+      const labelText = `Gesture: ${data.phrase_en} (${Math.round(data.confidence * 100)}%)`;
       ctx.fillStyle = 'rgba(236, 72, 153, 0.9)';
       ctx.font = '15px Inter, sans-serif';
       const textWidth = ctx.measureText(labelText).width;
@@ -724,47 +783,51 @@ export function App() {
       if (signIntervalRef.current) clearInterval(signIntervalRef.current);
       signIntervalRef.current = null;
       setAutoSignTrack(false);
-      speakText('Continuous sign recognition paused.');
+      speakText('Continuous gesture recognition paused.');
     } else {
       setAutoSignTrack(true);
-      speakText('Continuous sign sentence builder active. Hold hand in front of camera.');
+      speakText('Continuous gesture demo active. Hold hand clearly in front of camera.');
       signIntervalRef.current = setInterval(() => {
-        captureAndAnalyzeSign();
+        void captureAndAnalyzeSign();
       }, 1200);
     }
   };
 
-  // Shared Multilingual Voice Command Parser (English, Hindi, Marathi)
+  // Shared Multilingual Voice Command Parser (English, Hindi, Marathi + Whisper phonetic variants)
   const executeVoiceCommand = (transcript: string) => {
     const cmd = transcript.toLowerCase();
     if (!cmd.trim()) return;
 
     if (cmd.includes('what do you see') || cmd.includes('in front') || cmd.includes('describe') || cmd.includes('kya hai') || cmd.includes('saamne') || cmd.includes('क्या है') || cmd.includes('सामने') || cmd.includes('काय आहे')) {
-      setActiveTab('drishti');
       setDrishtiSubMode('vision');
       setVisionQuestion(transcript);
-      if (!isVisionCameraActive) {
-        startVisionCamera();
+      if (activeTab !== 'drishti') {
+        if (!isVisionCameraActive) {
+          pendingVisionStartRef.current = true;
+        }
+        switchTab('drishti');
+      } else if (!isVisionCameraActive) {
+        void startVisionCamera();
       } else {
-        captureAndAnalyzeVision(true, transcript);
+        void captureAndAnalyzeVision(true, transcript);
       }
     } else if (cmd.includes('currency') || cmd.includes('rupee') || cmd.includes('note') || cmd.includes('paisa') || cmd.includes('नोट') || cmd.includes('रुपये')) {
-      setActiveTab('drishti');
+      switchTab('drishti');
       setDrishtiSubMode('currency');
       if (isVisionCameraActive) {
-        setTimeout(() => captureAndAnalyzeVision(true), 200);
+        setTimeout(() => void captureAndAnalyzeVision(true), 200);
       } else {
         speakText('Switched to experimental currency check mode. Please verify notes by touch as well.');
       }
     } else if (cmd.includes('medicine') || cmd.includes('ocr') || cmd.includes('dawai') || cmd.includes('दवाई') || cmd.includes('पढ़ो')) {
-      setActiveTab('drishti');
+      switchTab('drishti');
       setDrishtiSubMode('ocr');
       speakText('Switched to Medicine and Document Reader mode.');
-    } else if (cmd.includes('drishti') || cmd.includes('vision') || cmd.includes('camera') || cmd.includes('eye') || cmd.includes('दृष्टि')) {
-      setActiveTab('drishti');
+    } else if (cmd.includes('drishti') || cmd.includes('dristhi') || cmd.includes('dristi') || cmd.includes('dhrishti') || cmd.includes('vision') || cmd.includes('camera') || cmd.includes('eye') || cmd.includes('दृष्टि')) {
+      switchTab('drishti');
       speakText('Opening Drishti Visual Assistant.');
-    } else if (cmd.includes('samvaad') || cmd.includes('sign') || cmd.includes('hand') || cmd.includes('gesture') || cmd.includes('संवाद') || cmd.includes('इशारा')) {
-      setActiveTab('samvaad');
+    } else if (cmd.includes('samvaad') || cmd.includes('samvad') || cmd.includes('samvard') || cmd.includes('sanvad') || cmd.includes('sign') || cmd.includes('hand') || cmd.includes('gesture') || cmd.includes('संवाद') || cmd.includes('इशारा')) {
+      switchTab('samvaad');
       speakText('Opening Samvaad 8-gesture speech demo.');
     } else if (cmd.includes('contrast')) {
       setHighContrast(prev => !prev);
@@ -779,9 +842,8 @@ export function App() {
     } else if (cmd.includes('read') || cmd.includes('summary')) {
       speakText('SAHAAY AI platform is active and ready.');
     } else if (activeTab === 'drishti' && isVisionCameraActive) {
-      // Any other spoken question while viewing Drishti camera asks the scene analyzer directly
       setVisionQuestion(transcript);
-      captureAndAnalyzeVision(true, transcript);
+      void captureAndAnalyzeVision(true, transcript);
     }
   };
 
@@ -845,8 +907,9 @@ export function App() {
 
           setIsTranscribing(true);
           try {
+            const filename = (audioBlob.type || '').includes('mp4') ? 'voice.mp4' : 'voice.webm';
             const formData = new FormData();
-            formData.append('file', audioBlob, 'voice.webm');
+            formData.append('file', audioBlob, filename);
             formData.append('language', selectedLang === 'en' ? 'auto' : selectedLang);
             formData.append('engine', micEngine);
 
@@ -883,7 +946,7 @@ export function App() {
         whisperStopTimerRef.current = setTimeout(() => {
           stopWhisperRecording();
         }, 6000);
-      } catch (err: any) {
+      } catch {
         const msg = "Microphone permission is blocked. Please allow microphone access in your browser.";
         setMicError(msg);
         speakText(msg);
@@ -955,6 +1018,7 @@ export function App() {
   // Direct Mobile Photo Capture Handlers
   const handleVisionPhoto = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
 
     if (drishtiSubMode === 'ocr') {
@@ -995,6 +1059,7 @@ export function App() {
 
   const handleSignPhoto = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
 
     const formData = new FormData();
@@ -1119,7 +1184,7 @@ export function App() {
       <nav className="nav-tabs" aria-label="Module Tabs">
         <button 
           className={`tab-btn ${activeTab === 'overview' ? 'active' : ''}`}
-          onClick={() => setActiveTab('overview')}
+          onClick={() => switchTab('overview')}
         >
           <Layers size={18} />
           <span>Platform Overview</span>
@@ -1127,7 +1192,7 @@ export function App() {
         <button 
           className={`tab-btn ${activeTab === 'drishti' ? 'active' : ''}`}
           onClick={() => {
-            setActiveTab('drishti');
+            switchTab('drishti');
             speakText("Navigated to Drishti Visual Assistant.");
           }}
         >
@@ -1137,7 +1202,7 @@ export function App() {
         <button 
           className={`tab-btn ${activeTab === 'samvaad' ? 'active' : ''}`}
           onClick={() => {
-            setActiveTab('samvaad');
+            switchTab('samvaad');
             speakText("Navigated to Samvaad 8-gesture speech demo.");
           }}
         >
@@ -1303,7 +1368,7 @@ export function App() {
                   <p className="module-description">
                     Continuous live camera narration ({vlmProvider ? `${vlmProvider.toUpperCase()} VLM` : 'YOLOv8n local + VLM-ready'}), spatial orientation (left / ahead / right), qualitative closeness (very close / nearby / far), sonar proximity cues, and medicine/document reading.
                   </p>
-                  <button className="module-cta-btn" onClick={() => setActiveTab('drishti')}>
+                  <button className="module-cta-btn" onClick={() => switchTab('drishti')}>
                     <span>Open Drishti Visual Assistant</span>
                     <ArrowRight size={16} />
                   </button>
@@ -1320,7 +1385,7 @@ export function App() {
                   <p className="module-description">
                     Experimental OpenCV hand-contour prototype mapping 8 sample hand gestures into bilingual Hindi &amp; English speech (not full ISL grammar).
                   </p>
-                  <button className="module-cta-btn" onClick={() => setActiveTab('samvaad')}>
+                  <button className="module-cta-btn" onClick={() => switchTab('samvaad')}>
                     <span>Open 8-Gesture Demo</span>
                     <ArrowRight size={16} />
                   </button>
@@ -1407,7 +1472,7 @@ export function App() {
                       <span>Start Camera</span>
                     </button>
                   ) : (
-                    <button className="icon-btn" onClick={stopVisionCamera}>
+                    <button className="icon-btn" onClick={() => stopVisionCamera()}>
                       <CameraOff size={18} />
                       <span>Stop Camera</span>
                     </button>
@@ -1696,7 +1761,7 @@ export function App() {
                       <span>Start Hand Camera</span>
                     </button>
                   ) : (
-                    <button className="icon-btn" onClick={stopSignCamera}>
+                    <button className="icon-btn" onClick={() => stopSignCamera()}>
                       <CameraOff size={18} />
                       <span>Stop Camera</span>
                     </button>
@@ -1764,9 +1829,10 @@ export function App() {
                   <button 
                     className="icon-btn" 
                     onClick={() => {
+                      gestureSequenceRef.current = [];
                       setGestureSequence([]);
                       setComposedSentence(null);
-                      speakText("Sign sequence reset.");
+                      speakText("Gesture sequence reset.");
                     }}
                     style={{ marginLeft: 'auto', padding: '0.25rem 0.5rem', fontSize: '0.75rem' }}
                     title="Clear Sequence"
@@ -1780,26 +1846,26 @@ export function App() {
               {/* Continuous Assembled Sentence Banner */}
               <div style={{ padding: '1.75rem', textAlign: 'center', background: 'rgba(236, 72, 153, 0.05)', borderBottom: '1px solid var(--border-color)' }}>
                 <span style={{ fontSize: '0.85rem', color: '#f472b6', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 700 }}>
-                  Assembled Conversational Translation
+                  Detected Gesture Output
                 </span>
                 <h3 style={{ fontSize: '2.25rem', fontWeight: 800, marginTop: '0.35rem', color: '#fff' }}>
-                  {composedSentence?.hi || signResult?.phrase_hi || "नमस्ते (Namaste)"}
+                  {composedSentence?.hi || signResult?.phrase_hi || "कोई हाथ का इशारा दिखाएँ"}
                 </h3>
                 <p style={{ fontSize: '1.25rem', color: 'var(--accent-cyan)', marginTop: '0.25rem', fontWeight: 600 }}>
-                  "{composedSentence?.en || signResult?.phrase_en || "Namaste / Hello"}"
+                  "{composedSentence?.en || signResult?.phrase_en || "Show a hand gesture or tap a sample below"}"
                 </p>
 
                 <div style={{ marginTop: '1rem', display: 'flex', justifyContent: 'center', gap: '0.75rem' }}>
                   <button 
                     className="icon-btn"
-                    onClick={() => speakText(composedSentence?.en || signResult?.phrase_en || "Namaste, Hello")}
+                    onClick={() => speakText(composedSentence?.en || signResult?.phrase_en || "Show a hand gesture")}
                   >
                     <Volume2 size={18} />
                     <span>Pronounce English</span>
                   </button>
                   <button 
                     className="icon-btn"
-                    onClick={() => speakText(composedSentence?.hi || signResult?.phrase_hi || "नमस्ते")}
+                    onClick={() => speakText(composedSentence?.hi || signResult?.phrase_hi || "कोई हाथ का इशारा दिखाएँ")}
                   >
                     <Volume2 size={18} />
                     <span>Pronounce Hindi</span>
