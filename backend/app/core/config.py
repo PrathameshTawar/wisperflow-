@@ -11,9 +11,11 @@ load_dotenv(_backend_dir.parent / ".env")
 
 class Settings(BaseModel):
     PROJECT_NAME: str = "SAHAAY AI"
-    VERSION: str = "0.1.0"
+    VERSION: str = "0.2.0"
     API_V1_PREFIX: str = "/api"
     CORS_ORIGINS: List[str] = ["*"]
     SARVAM_API_KEY: Optional[str] = os.getenv("SARVAM_API_KEY")
+    GEMINI_API_KEY: Optional[str] = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    ANTHROPIC_API_KEY: Optional[str] = os.getenv("ANTHROPIC_API_KEY")
 
 settings = Settings()
