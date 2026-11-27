@@ -29,6 +29,8 @@ async def transcribe_speech(
         audio_bytes = await file.read()
         result = speech_service.transcribe_audio(audio_bytes, language=language, engine=engine)
         return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Speech transcription failed: {str(e)}")
 
