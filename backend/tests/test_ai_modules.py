@@ -15,17 +15,28 @@ def create_dummy_image_bytes():
     img.save(buf, format="JPEG")
     return buf.getvalue()
 
-def test_vision_detect():
+def test_vision_status_and_no_meter_guesses():
+    status_res = client.get("/api/vision/status")
+    assert status_res.status_code == 200
+    s_data = status_res.json()
+    assert "active_engine" in s_data
+
     img_bytes = create_dummy_image_bytes()
     response = client.post(
         "/api/vision/detect",
-        files={"file": ("test.jpg", img_bytes, "image/jpeg")}
+        files={"file": ("test.jpg", img_bytes, "image/jpeg")},
+        data={"mode": "scene"}
     )
     assert response.status_code == 200
     data = response.json()
     assert "detections" in data
     assert "narration" in data
     assert "proximity_score" in data
+    assert "vision_engine" in data
+    # Distance claims must remain qualitative, never guessed meters/feet
+    narration_lower = data["narration"].lower()
+    assert "meter" not in narration_lower
+    assert "metre" not in narration_lower
 
 def test_vision_ocr_entity_extraction():
     sample_text = "Paracetamol 500mg\nBatch: B12\nExp: 08/2027\nRs. 45.00\nCaution: Take after food"
