@@ -71,14 +71,17 @@ class SpeechService:
         resampler = av.AudioResampler(format="fltp", layout="mono", rate=target_sr)
         chunks = []
 
-        with av.open(io.BytesIO(audio_bytes), mode="r") as container:
-            audio_streams = [s for s in container.streams if s.type == "audio"]
-            if not audio_streams:
-                return np.zeros(0, dtype=np.float32)
+        try:
+            with av.open(io.BytesIO(audio_bytes), mode="r") as container:
+                audio_streams = [s for s in container.streams if s.type == "audio"]
+                if not audio_streams:
+                    return np.zeros(0, dtype=np.float32)
 
-            for frame in container.decode(audio=0):
-                for resampled in resampler.resample(frame):
-                    chunks.append(resampled.to_ndarray().reshape(-1))
+                for frame in container.decode(audio=0):
+                    for resampled in resampler.resample(frame):
+                        chunks.append(resampled.to_ndarray().reshape(-1))
+        except Exception as e:
+            raise ValueError(f"Invalid or unreadable audio file: {e}")
 
         for resampled in resampler.resample(None):
             chunks.append(resampled.to_ndarray().reshape(-1))
