@@ -604,7 +604,7 @@ export function App() {
 
     const interval = setInterval(() => {
       void captureAndAnalyzeVision(false);
-    }, 2200);
+    }, 5500);
 
     return () => {
       clearTimeout(initialTimer);
@@ -1452,7 +1452,7 @@ export function App() {
                         setAutoVisionSpeak(!autoVisionSpeak);
                         speakText(!autoVisionSpeak ? "Auto-See and Speak turned on." : "Auto-See and Speak paused.");
                       }}
-                      title="Automatically describe what camera sees every 2 seconds"
+                      title="Automatically describe what camera sees every 5.5 seconds"
                     >
                       <Volume2 size={16} />
                       <span>Auto-Speak: {autoVisionSpeak ? 'ON' : 'OFF'}</span>
