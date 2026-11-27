@@ -1,0 +1,16 @@
+{
+  "short_name": "SAHAAY AI",
+  "name": "SAHAAY AI — Multilingual Voice-First Accessibility Platform",
+  "icons": [
+    {
+      "src": "favicon.svg",
+      "type": "image/svg+xml",
+      "sizes": "192x192 512x512"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#0a0f1d",
+  "theme_color": "#4f46e5",
+  "display": "standalone",
+  "orientation": "portrait"
+}
