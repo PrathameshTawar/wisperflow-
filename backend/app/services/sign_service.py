@@ -1,4 +1,5 @@
 import io
+import os
 import cv2
 import numpy as np
 from PIL import Image
@@ -6,6 +7,8 @@ from typing import Dict, Any, List, Optional
 
 class SignService:
     def __init__(self):
+        cascade_path = os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml")
+        self.face_cascade = cv2.CascadeClassifier(cascade_path) if os.path.exists(cascade_path) else None
         # 8 sample hand gestures for the gesture-to-speech prototype (not full ISL)
         self.vocabulary = {
             "NAMASTE": {
@@ -87,22 +90,39 @@ class SignService:
         }
 
     def decode_image(self, image_bytes: bytes) -> np.ndarray:
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        frame = np.array(image)
-        return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        if not image_bytes:
+            raise ValueError("Empty image payload.")
+        try:
+            image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+            frame = np.array(image)
+            return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        except Exception as e:
+            raise ValueError(f"Invalid or unsupported image file: {e}")
 
     def predict_from_image(self, image_bytes: bytes) -> Dict[str, Any]:
         """
-        Gesture-to-speech prototype: detects hand contour and counts convexity defects
-        (extended fingers) to map to 8 sample gestures. Not full ISL grammar.
+        Gesture-to-speech prototype: masks detected faces first, detects hand skin contour,
+        verifies internal texture, and counts convexity defects (extended fingers)
+        to map to 8 sample gestures. Not full ISL grammar.
         """
         frame = self.decode_image(image_bytes)
         height, width, _ = frame.shape
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
         ycrcb = cv2.cvtColor(frame, cv2.COLOR_BGR2YCrCb)
         lower_skin = np.array([0, 133, 77], dtype=np.uint8)
         upper_skin = np.array([255, 173, 127], dtype=np.uint8)
         mask = cv2.inRange(ycrcb, lower_skin, upper_skin)
+
+        # Mask out detected faces (and chin/neck slightly below) so user's face is not misread as a fist
+        if self.face_cascade is not None and not self.face_cascade.empty():
+            faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=5, minSize=(40, 40))
+            for (fx, fy, fw, fh) in faces:
+                x1 = max(0, int(fx - fw * 0.15))
+                y1 = max(0, int(fy - fh * 0.10))
+                x2 = min(width, int(fx + fw * 1.15))
+                y2 = min(height, int(fy + fh * 1.35))
+                mask[y1:y2, x1:x2] = 0
 
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         mask = cv2.erode(mask, kernel, iterations=1)
@@ -134,6 +154,21 @@ class SignService:
         hand_contour = max(valid_contours, key=cv2.contourArea)
         x, y, w, h = cv2.boundingRect(hand_contour)
         aspect_ratio = float(w) / h
+
+        # Reject ultra-smooth uniform skin ovals/walls lacking finger/knuckle edge detail inside the contour
+        inner_mask = np.zeros_like(mask)
+        cv2.drawContours(inner_mask, [hand_contour], -1, 255, -1)
+        inner_mask = cv2.erode(inner_mask, kernel, iterations=6)
+        interior_lap = cv2.Laplacian(gray, cv2.CV_64F)[inner_mask > 0]
+        if interior_lap.size == 0 or float(interior_lap.var()) < 10.0:
+            return {
+                "recognized": False,
+                "gesture": "NO_HAND",
+                "phrase_en": "No clear hand gesture detected",
+                "phrase_hi": "स्पष्ट हाथ का इशारा नहीं दिखा",
+                "confidence": 0.0,
+                "message": "Hold your hand clearly in front of the camera."
+            }
 
         hull = cv2.convexHull(hand_contour, returnPoints=False)
         defects_count = 0
