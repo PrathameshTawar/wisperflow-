@@ -1,62 +1,69 @@
-# SAHAAY AI — Voice-First Accessibility Bridge for Bharat
+# SAHAAY AI — Voice-First Visual Assistant & Gesture Demo
 
-A multilingual, voice-first accessibility platform built for blind, visually impaired, deaf, and hard-of-hearing individuals across India.
+A voice-first accessibility prototype built for blind, low-vision, and speech-impaired users in India.
 
-## The Pain Point
+## Primary Flow: Drishti (दृष्टि) — Voice-First Visual Assistant
 
-Millions of people in India with visual, hearing, or communication disabilities face daily barriers in markets, public transport, hospitals, and workplaces:
-- Blind and low-vision individuals struggle to identify nearby objects, read medicine strips/signboards, or verify Indian Rupee currency notes independently.
-- Deaf and hard-of-hearing individuals struggle to communicate in everyday settings with people who do not know Indian Sign Language (ISL).
+- **Ask & Hear What It Sees:** Point your laptop or phone camera and hear continuous spoken descriptions every ~2.2 seconds, or ask spoken questions (*"What is in front of me?"*, *"Is there a door?"*).
+- **Dual Vision Engine:**
+  - **Vision-Language Model (Recommended):** Supports **Google Gemini (`gemini-2.5-flash`)** or **Anthropic Claude (`claude-sonnet-4-5`)** when `GEMINI_API_KEY` / `ANTHROPIC_API_KEY` is set in `backend/.env` for full scene, signboard, door, and stair descriptions.
+  - **Local Offline Fallback (`YOLOv8n`):** Runs locally when no VLM key is configured (limited to 80 COCO object classes).
+- **Qualitative Distance Only:** Reports spatial sectors (`on your left`, `directly ahead`, `on your right`) and qualitative proximity (`very close`, `nearby`, `far`) paired with optional Web Audio sonar pulses. **Never guesses exact distances in meters or feet.**
+- **Label & Medicine Reader (OCR):** Uses VLM when configured, or on-device **Tesseract.js** OCR fallback with entity parsing (dosage, expiry date, MRP, warnings) and raw scanned text display.
+- **Currency Reader (Experimental):** Optional color-heuristic INR note check (`₹10`–`₹500`) explicitly marked experimental—never intended as a sole check for financial transactions.
 
-## Modules & Features
+## Secondary Prototype: Samvaad (संवाद) — Gesture-to-Speech Demo (8 Sample Gestures)
 
-### 1. Drishti (दृष्टि) — AI Vision, Currency & Medicine OCR
-- **Continuous Auto-See & Speak:** Live camera feed analyzes scenes every ~2.2 seconds via **YOLOv8n** (`ultralytics` + PyTorch) and speaks spatial descriptions (*"I see a person directly ahead, very close, and a chair on your left"*).
-- **Web Audio Sonar Proximity Cues:** Parking-sensor style audio pulses increase in pitch and speed as obstacles get closer.
-- **Indian Rupee (INR) Note Detector:** Dedicated currency reader mode for ₹10, ₹20, ₹50, ₹100, ₹200, and ₹500 notes.
-- **Medicine & Document OCR:** On-device **Tesseract.js** OCR paired with backend entity extraction for dosage (`500mg`), expiry date (`EXP`), MRP/price (`₹`), and warning labels.
-- **Voice Queries:** Ask *"What do you see?"*, *"Kya hai?"*, *"Currency"*, or *"Medicine"* hands-free.
+- **Scope & Honesty:** This is an **8-gesture demo prototype**—it is **not** full Indian Sign Language (ISL) grammar recognition and does **not** use MediaPipe.
+- **How It Works:** Uses **OpenCV** (`YCrCb` skin segmentation + convex hull finger-counting) to classify 8 sample hand poses (*Namaste/Hello, Thank You, Help, Water, Yes, No, Good, Stop*) into bilingual Hindi and English speech, plus a sample gesture-pair phrase builder.
 
-### 2. Samvaad (संवाद) — Indian Sign Language & Conversational Builder
-- **Hand Sign Recognition:** Camera-based hand contour and convexity-defect analysis (`OpenCV`) plus 21-landmark prediction endpoint (`POST /api/sign/predict`) supporting core ISL gestures (*Namaste, Thank You, Help, Water, Yes, No, Good, Stop*).
-- **Multi-Sign Sentence Builder:** Assembles consecutive signed gestures into bilingual Hindi & English conversational sentences (`POST /api/sign/sequence-sentence`) with audio readout.
+## Multilingual Voice Pipeline
 
-### 3. Multilingual Voice Pipeline
-- **Sarvam AI + Faster-Whisper STT:** `POST /api/speech/transcribe` decodes browser audio (`webm`/`ogg`/`wav`/`mp4`) in-memory via PyAV (`av`) and routes to **Sarvam AI (`saarika:v2.5`)** when `SARVAM_API_KEY` is configured, with automatic offline fallback to **`faster-whisper-base`** (`int8`).
-- **Sarvam AI + Browser TTS:** `POST /api/speech/tts` uses **Sarvam AI (`bulbul:v2`, speaker `anushka`)** for natural Indian-language speech when configured, falling back to browser `window.speechSynthesis`.
-- **Accessibility UI:** High-contrast toggle, large-font toggle, English/Hindi/Marathi/Tamil/Telugu/Bengali switcher, PWA manifest, and native mobile camera photo capture (`capture="environment"` / `capture="user"`).
+- **Sarvam AI (When `SARVAM_API_KEY` is set):** Uses `saarika:v2.5` (STT) and `bulbul:v2` speaker `anushka` (TTS) for Hindi, Marathi, Tamil, Telugu, Bengali, and English.
+- **Local Fallback (No API key):** Uses **`faster-whisper-base` (`int8`)** via **PyAV** (`av`) + browser `speechSynthesis`. Local `whisper-base` performs best on English; Hindi/Marathi accuracy requires setting `SARVAM_API_KEY`.
 
 ## Tech Stack
-- **Frontend:** React 19, TypeScript, Vite, Lucide Icons, Tesseract.js, Web Speech API, Web Audio API
-- **Backend:** Python 3.12, FastAPI, Uvicorn, PyTorch, Ultralytics YOLOv8n, OpenCV, faster-whisper, PyAV, Sarvam AI REST API
 
-## Safety & Limits
-- **Drishti is an assistance tool only:** It can miss moving vehicles, potholes, or transparent objects (e.g., glass doors) and must **never** replace a white cane, guide dog, or orientation/mobility training.
-- **Prototype scope:** Designed as an accessible prototype; lighting, camera angle, and occlusion affect vision and sign accuracy.
+- **Frontend:** React 19, TypeScript, Vite, Lucide Icons, Tesseract.js, Web Audio API, Web Speech API
+- **Backend:** Python 3.12, FastAPI, Uvicorn, PyTorch, Ultralytics YOLOv8n, OpenCV, faster-whisper, PyAV, httpx
 
-## Setup & Run Locally
+## Measured Benchmarks & Verification
 
-### 1. Backend (Python 3.12)
+Measured locally on this Windows workstation (`Python 3.12.10`, CPU mode):
+
+| Component | Measured Result | Notes |
+| :--- | :--- | :--- |
+| **Backend Test Suite (`pytest -v`)** | **9 / 9 passed** (`13.68s`) | API routes, OCR entity parser, qualitative distance guard, WAV STT/TTS endpoints |
+| **Frontend Build (`tsc -b && vite build`)** | **0 errors** (`1.02s`) | Production TypeScript + Vite bundle |
+| **YOLOv8n Local Detection (`640×480`)** | **129.6 ms median** (`161.5 ms` p95) | 10-run benchmark via `ml/evaluation/benchmark.py` (80 COCO classes) |
+| **OpenCV Gesture Contour Demo** | **6.0 ms median** | 10-run benchmark on synthetic `640×480` skin-tone blob |
+| **Faster-Whisper-base (`int8`)** | **43.5 ms median** (2s silent VAD clip) | Model loaded locally; real spoken latency depends on utterance length |
+| **Tesseract.js OCR (34pt clean label)** | **594 ms**, 100% text match | Read `PARACETAMOL 500mg / EXP: 08/2027 / MRP Rs. 45.00`; tiny 10px print misread `Rs. 45.00` as `Fs 4500` |
+
+*Planned User Evaluation Target (not yet conducted):* ≥80% completion across 20 guided accessibility tasks with ≥5 users/accessibility testers.
+
+## Safety & Limitations
+
+- **Drishti is an assistance tool only:** Camera vision can miss potholes, transparent glass doors, or fast-moving vehicles. It must **never** replace a white cane, guide dog, or orientation/mobility training.
+- **No external API keys committed:** Without `GEMINI_API_KEY` or `SARVAM_API_KEY` in `backend/.env`, the app runs entirely locally using `YOLOv8n` + `faster-whisper-base` + browser speech synthesis.
+
+## Run Locally
+
 ```powershell
+# 1. Backend
 cd E:\sahaay-ai\backend
 ..\.venv\Scripts\python.exe -m pip install -r requirements.txt
-# Optional: copy .env.example to .env and set SARVAM_API_KEY
+# Optional: copy .env.example to .env and add GEMINI_API_KEY + SARVAM_API_KEY
 ..\.venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
 
-### 2. Frontend (Node.js)
-```powershell
+# 2. Frontend
 cd E:\sahaay-ai\apps\web
 npm install
 npm run dev -- --host 0.0.0.0 --port 5173
-```
 
-Open **[http://localhost:5173/](http://localhost:5173/)** (API Swagger docs at **[http://localhost:8000/docs](http://localhost:8000/docs)**).
-
-### 3. Automated Tests
-```powershell
+# 3. Tests & Benchmarks
 cd E:\sahaay-ai\backend
 $env:PYTHONPATH = "."
 ..\.venv\Scripts\pytest.exe -v
+..\.venv\Scripts\python.exe ..\ml\evaluation\benchmark.py
 ```
-Current status: **9 / 9 backend tests passing**, frontend production build (`tsc -b && vite build`) verified with 0 errors.
