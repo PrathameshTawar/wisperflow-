@@ -97,7 +97,33 @@ const LANGUAGES = [
   { code: 'mr', label: 'Marathi', native: 'मराठी', speechCode: 'mr-IN' },
 ];
 
+const CONSENT_STORAGE_KEY = 'sahaay_consent_v1';
+
+const CONSENT_SPOKEN_EN =
+  'Notice: SAHAAY AI is an assistance tool only and never replaces a white cane, guide dog, or mobility training. When a cloud AI key is enabled, captured camera frames and voice audio are sent to Google, Anthropic, or Sarvam servers. Tap Yes, I Agree or say Yes to continue.';
+
+const CONSENT_SPOKEN_HI =
+  'सूचना: सहाय एआई केवल एक सहायक टूल है और सफेद छड़ी या गाइड डॉग की जगह नहीं ले सकता। क्लाउड एआई सक्रिय होने पर कैमरा और आवाज़ का डेटा बाहरी सर्वर पर भेजा जाता है। जारी रखने के लिए हाँ बोलें या Agree दबाएँ।';
+
+const readInitialConsent = (): boolean => {
+  try {
+    return localStorage.getItem(CONSENT_STORAGE_KEY) === 'accepted';
+  } catch {
+    return false;
+  }
+};
+
 export function App() {
+  const [hasConsented, setHasConsented] = useState<boolean>(readInitialConsent);
+  const [showConsentModal, setShowConsentModal] = useState<boolean>(() => !readInitialConsent());
+  const hasConsentedRef = useRef(hasConsented);
+  const pendingConsentActionRef = useRef<(() => void) | null>(null);
+  const consentAutoSpokenRef = useRef(false);
+
+  useEffect(() => {
+    hasConsentedRef.current = hasConsented;
+  }, [hasConsented]);
+
   const [activeTab, setActiveTab] = useState<'overview' | 'drishti' | 'samvaad'>('overview');
   const [health, setHealth] = useState<HealthData | null>(null);
   const [healthStatus, setHealthStatus] = useState<'loading' | 'online' | 'offline'>('loading');
@@ -355,6 +381,39 @@ export function App() {
     speakBrowserFallback(text, langConfig.speechCode);
   }, []);
 
+  const speakConsentPrompt = useCallback(() => {
+    const promptText =
+      selectedLangRef.current === 'hi' ? CONSENT_SPOKEN_HI : CONSENT_SPOKEN_EN;
+    void speakText(promptText);
+  }, [speakText]);
+
+  const acceptConsent = useCallback(() => {
+    hasConsentedRef.current = true;
+    setHasConsented(true);
+    setShowConsentModal(false);
+    try {
+      localStorage.setItem(CONSENT_STORAGE_KEY, 'accepted');
+    } catch {
+      // Ignore storage errors in restricted environments
+    }
+    const nextAction = pendingConsentActionRef.current;
+    pendingConsentActionRef.current = null;
+    if (nextAction) {
+      nextAction();
+    } else {
+      void speakText('Consent confirmed. SAHAAY AI is active as an assistance tool only.');
+    }
+  }, [speakText]);
+
+  useEffect(() => {
+    if (hasConsented || consentAutoSpokenRef.current) return;
+    consentAutoSpokenRef.current = true;
+    const timer = setTimeout(() => {
+      speakConsentPrompt();
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [hasConsented, speakConsentPrompt]);
+
   // Camera Stream Request
   const requestCameraStream = async (facing: 'user' | 'environment') => {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -376,7 +435,7 @@ export function App() {
   };
 
   // Drishti Camera Management
-  const startVisionCamera = useCallback(async (facing = visionFacingMode) => {
+  const beginVisionStream = useCallback(async (facing: 'user' | 'environment') => {
     setVisionCameraError(null);
     try {
       const stream = await requestCameraStream(facing);
@@ -404,7 +463,19 @@ export function App() {
       setVisionCameraError(msg);
       speakText(msg);
     }
-  }, [visionFacingMode, speakText]);
+  }, [speakText]);
+
+  const startVisionCamera = useCallback(async (facing = visionFacingMode) => {
+    if (!hasConsentedRef.current) {
+      pendingConsentActionRef.current = () => {
+        void beginVisionStream(facing);
+      };
+      setShowConsentModal(true);
+      speakConsentPrompt();
+      return;
+    }
+    await beginVisionStream(facing);
+  }, [visionFacingMode, beginVisionStream, speakConsentPrompt]);
 
   const stopVisionCamera = useCallback((silent = false) => {
     if (visionVideoRef.current && visionVideoRef.current.srcObject) {
@@ -426,6 +497,14 @@ export function App() {
 
   // Samvaad Camera Management
   const startSignCamera = async (facing = signFacingMode) => {
+    if (!hasConsentedRef.current) {
+      pendingConsentActionRef.current = () => {
+        void startSignCamera(facing);
+      };
+      setShowConsentModal(true);
+      speakConsentPrompt();
+      return;
+    }
     setSignCameraError(null);
     try {
       const stream = await requestCameraStream(facing);
@@ -798,6 +877,25 @@ export function App() {
     const cmd = transcript.toLowerCase();
     if (!cmd.trim()) return;
 
+    if (!hasConsentedRef.current) {
+      if (
+        cmd.includes('yes') ||
+        cmd.includes('agree') ||
+        cmd.includes('continue') ||
+        cmd.includes('accept') ||
+        cmd.includes('haan') ||
+        cmd.includes('हां') ||
+        cmd.includes('हाँ') ||
+        cmd.includes('होय')
+      ) {
+        acceptConsent();
+        return;
+      }
+      setShowConsentModal(true);
+      speakConsentPrompt();
+      return;
+    }
+
     if (cmd.includes('what do you see') || cmd.includes('in front') || cmd.includes('describe') || cmd.includes('kya hai') || cmd.includes('saamne') || cmd.includes('क्या है') || cmd.includes('सामने') || cmd.includes('काय आहे')) {
       setDrishtiSubMode('vision');
       setVisionQuestion(transcript);
@@ -1020,6 +1118,11 @@ export function App() {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
+    if (!hasConsentedRef.current) {
+      setShowConsentModal(true);
+      speakConsentPrompt();
+      return;
+    }
 
     if (drishtiSubMode === 'ocr') {
       runDocumentOCR(file);
@@ -1112,6 +1215,98 @@ export function App() {
 
   return (
     <div className="app-container">
+      {showConsentModal && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="consent-dialog-title"
+          aria-describedby="consent-dialog-desc"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 9999,
+            backgroundColor: 'rgba(2, 6, 23, 0.88)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '1rem',
+          }}
+        >
+          <div
+            style={{
+              maxWidth: '560px',
+              width: '100%',
+              background: '#0f172a',
+              color: '#f8fafc',
+              border: '2px solid #f59e0b',
+              borderRadius: '16px',
+              padding: '1.5rem',
+              boxShadow: '0 20px 50px rgba(0, 0, 0, 0.6)',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', marginBottom: '0.75rem' }}>
+              <AlertTriangle size={24} color="#f59e0b" aria-hidden="true" />
+              <h2 id="consent-dialog-title" style={{ margin: 0, fontSize: '1.25rem', fontWeight: 700 }}>
+                Safety &amp; Privacy Notice (Assistance Tool Only)
+              </h2>
+            </div>
+
+            <div id="consent-dialog-desc" style={{ fontSize: '0.95rem', lineHeight: 1.6, color: '#e2e8f0' }}>
+              <p style={{ marginBottom: '0.65rem' }}>
+                <strong>1. Not a cane or guide-dog replacement:</strong> Drishti can miss potholes, glass doors, stairs, or moving traffic. Always rely on your primary mobility aid.
+              </p>
+              <p style={{ marginBottom: '0.65rem' }}>
+                <strong>2. Camera &amp; audio processing:</strong>{' '}
+                {vlmProvider || sarvamAvailable
+                  ? 'Cloud AI is currently active on this server. Camera frames and microphone audio are sent to Google, Anthropic, or Sarvam servers.'
+                  : 'Currently running local fallback (YOLO + Whisper). When a Gemini, Claude, or Sarvam key is configured, camera frames and voice audio are sent to external servers.'}
+              </p>
+              <p style={{ marginBottom: '1rem', color: '#cbd5e1', fontSize: '0.88rem' }}>
+                सहाय एआई केवल एक सहायक टूल है। जारी रखने के लिए <strong>Yes, I Agree</strong> दबाएँ या माइक से <strong>&quot;Yes&quot;</strong> / <strong>&quot;हाँ&quot;</strong> बोलें।
+              </p>
+            </div>
+
+            <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center' }}>
+              <button
+                type="button"
+                className="icon-btn active"
+                autoFocus
+                onClick={acceptConsent}
+                style={{
+                  background: '#16a34a',
+                  borderColor: '#22c55e',
+                  color: '#ffffff',
+                  fontWeight: 700,
+                  padding: '0.75rem 1.25rem',
+                }}
+              >
+                <CheckCircle2 size={18} />
+                <span>Yes, I Agree &amp; Continue</span>
+              </button>
+
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={speakConsentPrompt}
+              >
+                <Volume2 size={18} />
+                <span>Hear Notice Aloud</span>
+              </button>
+
+              <button
+                type="button"
+                className={`icon-btn ${isListening ? 'active' : ''}`}
+                onClick={toggleListening}
+                disabled={isTranscribing}
+              >
+                {isListening ? <MicOff size={18} /> : <Mic size={18} />}
+                <span>{isTranscribing ? 'Listening...' : isListening ? 'Stop Mic' : 'Say "Yes" by Voice'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <header className="app-header" role="banner">
         <div className="brand-section">
@@ -1955,7 +2150,27 @@ export function App() {
       {/* Footer */}
       <footer className="app-footer" role="contentinfo">
         <p>SAHAAY AI — FastAPI, PyTorch, YOLOv8n, OpenCV, Faster-Whisper / Sarvam AI, Tesseract.js, React & TypeScript</p>
-        <p style={{ marginTop: '0.25rem' }}>Assistance prototype only — not a substitute for mobility aids or professional interpreters</p>
+        <p style={{ marginTop: '0.25rem' }}>
+          Assistance prototype only — not a substitute for mobility aids or professional interpreters{' '}
+          <button
+            type="button"
+            onClick={() => {
+              setShowConsentModal(true);
+              speakConsentPrompt();
+            }}
+            style={{
+              background: 'none',
+              border: 'none',
+              color: '#93c5fd',
+              textDecoration: 'underline',
+              cursor: 'pointer',
+              font: 'inherit',
+              marginLeft: '0.5rem',
+            }}
+          >
+            Safety &amp; Consent Notice
+          </button>
+        </p>
       </footer>
     </div>
   );
