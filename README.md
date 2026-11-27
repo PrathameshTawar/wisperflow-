@@ -33,7 +33,7 @@ Measured locally on this Windows workstation (`Python 3.12.10`, CPU mode):
 
 | Component | Measured Result | Notes |
 | :--- | :--- | :--- |
-| **Backend Test Suite (`pytest -v`)** | **9 / 9 passed** (`13.68s`) | API routes, OCR entity parser, qualitative distance guard, WAV STT/TTS endpoints |
+| **Backend Test Suite (`pytest -v`)** | **11 / 11 passed** (`9.75s`) | API routes, OCR entity parser, qualitative distance guard, 400 error guards, no false-positive currency/face checks |
 | **Frontend Build (`tsc -b && vite build`)** | **0 errors** (`1.02s`) | Production TypeScript + Vite bundle |
 | **YOLOv8n Local Inference Latency (`640×480`)** | **129.6 ms median** (`161.5 ms` p95) | Speed-only benchmark (`ml/evaluation/benchmark.py`) on CPU; covers 80 COCO classes |
 | **Tesseract.js OCR (generated test PNGs)** | **594 ms** on 34pt label; tiny 10px print misread `Rs. 45.00` as `Fs 4500` | Synthetic test only — real medicine strip photo testing in progress via `ml/evaluation/scene_eval_log.csv` |
