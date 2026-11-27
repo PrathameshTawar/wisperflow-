@@ -107,3 +107,39 @@ def test_speech_tts_endpoint():
     data = response.json()
     assert "provider" in data
     assert "audio_b64" in data
+
+def test_corrupt_uploads_return_400():
+    r_vis = client.post("/api/vision/detect", files={"file": ("bad.jpg", b"not-an-image", "image/jpeg")})
+    assert r_vis.status_code == 400
+
+    r_sign = client.post("/api/sign/detect-frame", files={"file": ("bad.jpg", b"not-an-image", "image/jpeg")})
+    assert r_sign.status_code == 400
+
+    r_aud = client.post("/api/speech/transcribe", files={"file": ("bad.webm", b"not-audio", "audio/webm")})
+    assert r_aud.status_code == 400
+
+def test_no_false_positive_currency_or_smooth_face():
+    # Solid blue shirt should not trigger ₹50 note
+    blue_img = Image.new("RGB", (400, 300), (60, 110, 190))
+    buf = io.BytesIO()
+    blue_img.save(buf, format="JPEG")
+    r_cur = client.post(
+        "/api/vision/detect",
+        files={"file": ("shirt.jpg", buf.getvalue(), "image/jpeg")},
+        data={"mode": "currency"}
+    )
+    assert r_cur.status_code == 200
+    assert r_cur.json()["detections"] == []
+
+    # Smooth skin oval without finger/knuckle texture should not trigger YES
+    from PIL import ImageDraw
+    face_img = Image.new("RGB", (640, 480), (230, 230, 230))
+    ImageDraw.Draw(face_img).ellipse((240, 60, 400, 260), fill=(215, 165, 130))
+    buf2 = io.BytesIO()
+    face_img.save(buf2, format="JPEG")
+    r_face = client.post(
+        "/api/sign/detect-frame",
+        files={"file": ("face.jpg", buf2.getvalue(), "image/jpeg")}
+    )
+    assert r_face.status_code == 200
+    assert r_face.json()["recognized"] is False
