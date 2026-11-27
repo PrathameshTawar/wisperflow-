@@ -1,0 +1,11 @@
+scene_id,target_object,spoken_question,engine_used,app_narration,accurate_yes_partial_no,notes
+1,desk,"What is in front of me?",,,,
+2,door,"Where is the door?",,,,
+3,person,"Who or what is ahead?",,,,
+4,chair,"What is in front of me?",,,,
+5,bottle,"What is on the table?",,,,
+6,signboard_or_printed_page,"Read what is written here",,,,
+7,medicine_strip,"Read medicine name and expiry",,,,
+8,cup_or_mug,"What is in front of me?",,,,
+9,stairs_or_hallway,"Describe what is ahead",,,,
+10,dim_lighting_object,"What is in front of me?",,,,
