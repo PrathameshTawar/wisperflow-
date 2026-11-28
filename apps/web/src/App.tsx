@@ -65,6 +65,7 @@ interface VisionResponse {
 interface OCREntities {
   dosage?: string;
   expiry?: string;
+  mfg?: string;
   price?: string;
   warning?: string;
 }
@@ -73,6 +74,10 @@ interface OCRResponse {
   full_text: string;
   lines: string[];
   entities: OCREntities;
+  unclear?: boolean;
+  ocr_confidence?: number | null;
+  is_medical_verification?: boolean;
+  medical_disclaimer?: string;
   speech_summary: string;
 }
 
@@ -80,10 +85,13 @@ interface SignPrediction {
   recognized: boolean;
   gesture: string;
   confidence: number;
+  score_type?: string;
+  threshold?: number;
   phrase_en: string;
   phrase_hi: string;
   category: string;
   description: string;
+  message?: string;
   bbox?: [number, number, number, number];
   fingers_detected?: number;
 }
@@ -156,27 +164,36 @@ export function App() {
 
   // Drishti Vision State
   const [drishtiSubMode, setDrishtiSubMode] = useState<'vision' | 'currency' | 'ocr'>('vision');
+  const drishtiSubModeRef = useRef<'vision' | 'currency' | 'ocr'>('vision');
   const [autoVisionSpeak, setAutoVisionSpeak] = useState(true);
   const [vlmProvider, setVlmProvider] = useState<string | null>(null);
   const [visionQuestion, setVisionQuestion] = useState('');
   const [isVisionCameraActive, setIsVisionCameraActive] = useState(false);
+  const isVisionCameraActiveRef = useRef(false);
   const [visionFacingMode, setVisionFacingMode] = useState<'user' | 'environment'>('environment');
   const [visionResult, setVisionResult] = useState<VisionResponse | null>(null);
   const [ocrResult, setOcrResult] = useState<OCRResponse | null>(null);
   const [isAnalyzingVision, setIsAnalyzingVision] = useState(false);
   const [visionCameraError, setVisionCameraError] = useState<string | null>(null);
+  const [visionActionError, setVisionActionError] = useState<string | null>(null);
   const visionVideoRef = useRef<HTMLVideoElement | null>(null);
   const visionCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const isAnalyzingVisionRef = useRef(false);
   const lastSpokenVisionRef = useRef<{ text: string; time: number }>({ text: '', time: 0 });
-  const pendingVisionStartRef = useRef(false);
+  const pendingVisionActionRef = useRef<'none' | 'scene' | 'currency' | 'ocr'>('none');
   const visionQuestionRef = useRef('');
   const selectedLangRef = useRef('en');
+  const lastGuidanceRef = useRef<string>('Welcome to SAHAAY AI — India’s voice-first accessibility platform.');
+  const lastVisionOpRef = useRef<{ kind: 'scene' | 'currency' | 'ocr'; question?: string; imageSource?: string | File } | null>(null);
 
   // Samvaad Sign State
   const [isSignCameraActive, setIsSignCameraActive] = useState(false);
   const [signFacingMode, setSignFacingMode] = useState<'user' | 'environment'>('user');
   const [signResult, setSignResult] = useState<SignPrediction | null>(null);
+  const [pendingSign, setPendingSign] = useState<SignPrediction | null>(null);
+  const pendingSignRef = useRef<SignPrediction | null>(null);
+  const [requireSignConfirm, setRequireSignConfirm] = useState(true);
+  const requireSignConfirmRef = useRef(true);
   const [gestureSequence, setGestureSequence] = useState<string[]>([]);
   const gestureSequenceRef = useRef<string[]>([]);
   const [composedSentence, setComposedSentence] = useState<{ en: string; hi: string } | null>(null);
@@ -187,6 +204,9 @@ export function App() {
   const signVideoRef = useRef<HTMLVideoElement | null>(null);
   const signCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const signIntervalRef = useRef<any>(null);
+  const lastSpokenUnknownSignRef = useRef<number>(0);
+  const lastProcessedResultIdxRef = useRef<number>(-1);
+  const executeVoiceCommandRef = useRef<(transcript: string) => void>(() => {});
 
   useEffect(() => {
     visionQuestionRef.current = visionQuestion;
@@ -195,6 +215,22 @@ export function App() {
   useEffect(() => {
     selectedLangRef.current = selectedLang;
   }, [selectedLang]);
+
+  useEffect(() => {
+    drishtiSubModeRef.current = drishtiSubMode;
+  }, [drishtiSubMode]);
+
+  useEffect(() => {
+    isVisionCameraActiveRef.current = isVisionCameraActive;
+  }, [isVisionCameraActive]);
+
+  useEffect(() => {
+    pendingSignRef.current = pendingSign;
+  }, [pendingSign]);
+
+  useEffect(() => {
+    requireSignConfirmRef.current = requireSignConfirm;
+  }, [requireSignConfirm]);
 
   // Accessibility Modes
   useEffect(() => {
@@ -317,6 +353,17 @@ export function App() {
     sarvamAvailableRef.current = sarvamAvailable;
   }, [sarvamAvailable]);
 
+  const stopAllSpeech = useCallback(() => {
+    if (currentAudioRef.current) {
+      currentAudioRef.current.pause();
+      currentAudioRef.current = null;
+    }
+    isSarvamSpeakingRef.current = false;
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+  }, []);
+
   const speakBrowserFallback = (text: string, speechCode = 'en-IN') => {
     if ('speechSynthesis' in window) {
       window.speechSynthesis.cancel();
@@ -328,18 +375,14 @@ export function App() {
     }
   };
 
-  const speakText = useCallback(async (text: string) => {
+  const speakText = useCallback(async (text: string, rememberForRepeat = false) => {
     if (!text) return;
     setVoiceAnnouncement(text);
+    if (rememberForRepeat) {
+      lastGuidanceRef.current = text;
+    }
 
-    if (currentAudioRef.current) {
-      currentAudioRef.current.pause();
-      currentAudioRef.current = null;
-    }
-    isSarvamSpeakingRef.current = false;
-    if ('speechSynthesis' in window) {
-      window.speechSynthesis.cancel();
-    }
+    stopAllSpeech();
 
     const langConfig = LANGUAGES.find(l => l.code === selectedLangRef.current) || LANGUAGES[0];
 
@@ -379,7 +422,7 @@ export function App() {
     }
 
     speakBrowserFallback(text, langConfig.speechCode);
-  }, []);
+  }, [stopAllSpeech]);
 
   const speakConsentPrompt = useCallback(() => {
     const promptText =
@@ -434,34 +477,141 @@ export function App() {
     }
   };
 
+  const captureVideoFrameDataUrl = (video: HTMLVideoElement, quality = 0.85): string | null => {
+    if (!video.videoWidth || !video.videoHeight) return null;
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', quality);
+  };
+
+  const preprocessImageForOCR = (imageSource: string | File): Promise<string | File> => {
+    return new Promise((resolve) => {
+      const img = new Image();
+      let objectUrl: string | null = null;
+      img.onload = () => {
+        try {
+          const targetW = Math.min(1800, Math.max(img.width, 1200));
+          const scale = targetW / Math.max(img.width, 1);
+          const targetH = Math.round(img.height * scale);
+          const canvas = document.createElement('canvas');
+          canvas.width = targetW;
+          canvas.height = targetH;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            if (objectUrl) URL.revokeObjectURL(objectUrl);
+            resolve(imageSource);
+            return;
+          }
+          ctx.drawImage(img, 0, 0, targetW, targetH);
+          const imgData = ctx.getImageData(0, 0, targetW, targetH);
+          const d = imgData.data;
+          // Lightweight contrast-stretched grayscale to sharpen small printed medicine text
+          let minL = 255;
+          let maxL = 0;
+          for (let i = 0; i < d.length; i += 4) {
+            const lum = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+            if (lum < minL) minL = lum;
+            if (lum > maxL) maxL = lum;
+          }
+          const span = Math.max(20, maxL - minL);
+          for (let i = 0; i < d.length; i += 4) {
+            const lum = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+            const stretched = Math.min(255, Math.max(0, ((lum - minL) * 255) / span));
+            d[i] = stretched;
+            d[i + 1] = stretched;
+            d[i + 2] = stretched;
+          }
+          ctx.putImageData(imgData, 0, 0);
+          const out = canvas.toDataURL('image/png');
+          if (objectUrl) URL.revokeObjectURL(objectUrl);
+          resolve(out);
+        } catch {
+          if (objectUrl) URL.revokeObjectURL(objectUrl);
+          resolve(imageSource);
+        }
+      };
+      img.onerror = () => {
+        if (objectUrl) URL.revokeObjectURL(objectUrl);
+        resolve(imageSource);
+      };
+      if (typeof imageSource === 'string') {
+        img.src = imageSource;
+      } else {
+        objectUrl = URL.createObjectURL(imageSource);
+        img.src = objectUrl;
+      }
+    });
+  };
+
+  const captureVisionRef = useRef<(forceSpeak?: boolean, questionOverride?: string) => Promise<void>>(async () => {});
+  const runDocumentOcrRef = useRef<(imageSource: string | File) => Promise<void>>(async () => {});
+
   // Drishti Camera Management
   const beginVisionStream = useCallback(async (facing: 'user' | 'environment') => {
     setVisionCameraError(null);
+    setVisionActionError(null);
     try {
       const stream = await requestCameraStream(facing);
-      if (visionVideoRef.current) {
-        visionVideoRef.current.srcObject = stream;
-        await visionVideoRef.current.play();
+      const videoEl = visionVideoRef.current;
+      if (videoEl) {
+        videoEl.srcObject = stream;
+        await videoEl.play();
+        isVisionCameraActiveRef.current = true;
         setIsVisionCameraActive(true);
-        speakText('Camera activated for Drishti Vision.');
+
+        const pendingAction = pendingVisionActionRef.current;
+        if (pendingAction !== 'none') {
+          pendingVisionActionRef.current = 'none';
+          let attempts = 0;
+          const waitAndRun = () => {
+            const v = visionVideoRef.current;
+            if (!v || !isVisionCameraActiveRef.current) return;
+            if (v.videoWidth > 0) {
+              if (pendingAction === 'ocr') {
+                const frameUrl = captureVideoFrameDataUrl(v, 0.92);
+                if (frameUrl) {
+                  void runDocumentOcrRef.current(frameUrl);
+                } else {
+                  speakText('Camera started, but could not capture frame. Say read label to retry.');
+                }
+              } else {
+                void captureVisionRef.current(true);
+              }
+              return;
+            }
+            if (attempts++ < 25) {
+              setTimeout(waitAndRun, 120);
+            } else {
+              speakText('Camera started. Point at your subject and say what do you see or read this label.');
+            }
+          };
+          setTimeout(waitAndRun, 150);
+        } else {
+          speakText('Camera activated for Drishti Vision.');
+        }
       } else {
         // Component unmounted before getUserMedia resolved; prevent stream leak
         stream.getTracks().forEach(t => t.stop());
       }
     } catch (err: any) {
       console.error("Camera error:", err);
-      let msg = "Could not access live camera.";
+      pendingVisionActionRef.current = 'none';
+      let msg = "Could not access live camera. You can still upload or snap a photo below.";
       if (err.message === "SECURE_CONTEXT_REQUIRED") {
-        msg = "Mobile live video stream is blocked by browser security over HTTP. Tap 'Take Phone Camera Photo' below to use your phone's camera directly!";
+        msg = "Mobile live video stream is blocked by browser security over HTTP. Tap 'Take Phone Camera Photo' below to use your phone's camera directly.";
       } else if (err.name === 'NotAllowedError') {
-        msg = "Camera permission was denied. Please allow camera permissions in your browser.";
+        msg = "Camera permission was denied. Please allow camera permissions in your browser and say start camera.";
       } else if (err.name === 'NotFoundError') {
-        msg = "No camera found. Use 'Take Phone Camera Photo' or 'Upload Image'.";
+        msg = "No camera found. Use 'Take Phone Camera Photo' or 'Upload Image' below.";
       } else if (err.name === 'NotReadableError') {
-        msg = "Camera is already in use by another app. Please close other camera apps and retry.";
+        msg = "Camera is already in use by another app. Please close other camera apps and try again.";
       }
       setVisionCameraError(msg);
-      speakText(msg);
+      speakText(msg, true);
     }
   }, [speakText]);
 
@@ -478,11 +628,13 @@ export function App() {
   }, [visionFacingMode, beginVisionStream, speakConsentPrompt]);
 
   const stopVisionCamera = useCallback((silent = false) => {
+    pendingVisionActionRef.current = 'none';
     if (visionVideoRef.current && visionVideoRef.current.srcObject) {
       const stream = visionVideoRef.current.srcObject as MediaStream;
       stream.getTracks().forEach(t => t.stop());
       visionVideoRef.current.srcObject = null;
     }
+    isVisionCameraActiveRef.current = false;
     setIsVisionCameraActive(false);
     setVisionResult(null);
     if (!silent) speakText('Drishti camera stopped.');
@@ -518,16 +670,16 @@ export function App() {
       }
     } catch (err: any) {
       console.error("Sign camera error:", err);
-      let msg = "Could not access live camera.";
+      let msg = "Could not access live camera. Try 'Snap Hand Photo with Phone' or upload a hand photo.";
       if (err.message === "SECURE_CONTEXT_REQUIRED") {
-        msg = "Mobile live video is blocked by browser security over HTTP. Tap 'Snap Hand Photo with Phone' below to take a photo directly!";
+        msg = "Mobile live video is blocked by browser security over HTTP. Tap 'Snap Hand Photo with Phone' below to take a photo directly.";
       } else if (err.name === 'NotAllowedError') {
-        msg = "Camera permission was denied. Please allow camera access in your browser.";
+        msg = "Camera permission was denied. Please allow camera access in your browser and retry.";
       } else if (err.name === 'NotReadableError') {
         msg = "Camera is already in use by another app. Please close other camera apps and retry.";
       }
       setSignCameraError(msg);
-      speakText(msg);
+      speakText(msg, true);
     }
   };
 
@@ -544,6 +696,7 @@ export function App() {
     }
     setIsSignCameraActive(false);
     setSignResult(null);
+    setPendingSign(null);
     if (!silent) speakText('Gesture camera stopped.');
   }, [speakText]);
 
@@ -555,20 +708,19 @@ export function App() {
   };
 
   // Clean tab switcher: stops active camera tracks when leaving a tab to avoid hardware locks
-  const switchTab = (nextTab: 'overview' | 'drishti' | 'samvaad') => {
-    if (nextTab !== 'drishti' && isVisionCameraActive) {
+  const switchTab = useCallback((nextTab: 'overview' | 'drishti' | 'samvaad') => {
+    if (nextTab !== 'drishti' && isVisionCameraActiveRef.current) {
       stopVisionCamera(true);
     }
     if (nextTab !== 'samvaad' && isSignCameraActive) {
       stopSignCamera(true);
     }
     setActiveTab(nextTab);
-  };
+  }, [isSignCameraActive, stopVisionCamera, stopSignCamera]);
 
   // Start Drishti camera automatically after tab mounts if triggered via voice from Overview
   useEffect(() => {
-    if (activeTab === 'drishti' && pendingVisionStartRef.current) {
-      pendingVisionStartRef.current = false;
+    if (activeTab === 'drishti' && pendingVisionActionRef.current !== 'none' && !isVisionCameraActiveRef.current) {
       void startVisionCamera();
     }
   }, [activeTab, startVisionCamera]);
@@ -610,12 +762,14 @@ export function App() {
 
   // Drishti VLM / YOLO Scene & Experimental Currency Analysis
   const captureAndAnalyzeVision = useCallback(async (forceSpeak = false, questionOverride?: string) => {
-    if (!visionVideoRef.current || !isVisionCameraActive || isAnalyzingVisionRef.current) return;
-    if (!visionVideoRef.current.videoWidth) return;
+    const video = visionVideoRef.current;
+    if (!video || !isVisionCameraActiveRef.current || isAnalyzingVisionRef.current) return;
+    if (!video.videoWidth) return;
 
     isAnalyzingVisionRef.current = true;
     setIsAnalyzingVision(true);
-    const video = visionVideoRef.current;
+    setVisionActionError(null);
+
     const hiddenCanvas = document.createElement('canvas');
     hiddenCanvas.width = video.videoWidth || 640;
     hiddenCanvas.height = video.videoHeight || 480;
@@ -628,8 +782,9 @@ export function App() {
 
     ctx.drawImage(video, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
     const base64Data = hiddenCanvas.toDataURL('image/jpeg', 0.8);
-    const apiMode = drishtiSubMode === 'currency' ? 'currency' : 'scene';
+    const apiMode = drishtiSubModeRef.current === 'currency' ? 'currency' : 'scene';
     const activeQ = (questionOverride !== undefined ? questionOverride : visionQuestionRef.current).trim() || undefined;
+    lastVisionOpRef.current = { kind: apiMode, question: activeQ };
 
     try {
       const res = await fetch('/api/vision/detect-base64', {
@@ -660,18 +815,29 @@ export function App() {
           const cooldownPassed = now - last.time > 7000;
 
           if (forceSpeak || (!isSpeaking && (changed || cooldownPassed))) {
-            speakText(data.narration);
+            speakText(data.narration, true);
             lastSpokenVisionRef.current = { text: data.narration, time: now };
           }
         }
+      } else {
+        const errMsg = `Vision service returned status ${res.status}. Please say try again or check the backend server.`;
+        setVisionActionError(errMsg);
+        if (forceSpeak) speakText(errMsg, true);
       }
     } catch (e) {
       console.error("Vision analysis failed", e);
+      const errMsg = "Could not reach the Drishti server. Check that the backend is running, then say try again.";
+      setVisionActionError(errMsg);
+      if (forceSpeak) speakText(errMsg, true);
     } finally {
       isAnalyzingVisionRef.current = false;
       setIsAnalyzingVision(false);
     }
-  }, [isVisionCameraActive, drishtiSubMode, drawVisionBoxes, speakText, playSonarBeep]);
+  }, [drawVisionBoxes, speakText, playSonarBeep]);
+
+  useEffect(() => {
+    captureVisionRef.current = captureAndAnalyzeVision;
+  }, [captureAndAnalyzeVision]);
 
   // Automatic Continuous See & Speak Loop when Drishti Camera is Active
   useEffect(() => {
@@ -692,10 +858,12 @@ export function App() {
   }, [isVisionCameraActive, autoVisionSpeak, drishtiSubMode, captureAndAnalyzeVision]);
 
   // Document & Medicine Reader: uses VLM when configured, or local Tesseract.js OCR fallback
-  const runDocumentOCR = async (imageSource: string | File) => {
+  const runDocumentOCR = useCallback(async (imageSource: string | File) => {
     setIsAnalyzingVision(true);
+    setVisionActionError(null);
     setOcrResult(null);
-    speakText("Scanning medicine or document text. Please hold steady...");
+    lastVisionOpRef.current = { kind: 'ocr', imageSource };
+    speakText("Scanning label text. Please hold steady...");
 
     try {
       if (vlmProvider) {
@@ -704,38 +872,54 @@ export function App() {
           res = await fetch('/api/vision/detect-base64', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ image_base64: imageSource, mode: 'ocr', language: selectedLang })
+            body: JSON.stringify({ image_base64: imageSource, mode: 'ocr', language: selectedLangRef.current })
           });
         } else {
           const fd = new FormData();
           fd.append('file', imageSource);
           fd.append('mode', 'ocr');
-          fd.append('language', selectedLang);
+          fd.append('language', selectedLangRef.current);
           res = await fetch('/api/vision/detect', { method: 'POST', body: fd });
         }
         if (res.ok) {
           const vData: VisionResponse = await res.json();
-          const summary = vData.narration || "Could not read text clearly.";
+          const summary = vData.narration || "Label text could not be read clearly. Move closer in brighter light and say try again.";
           setOcrResult({
             full_text: summary,
             lines: [summary],
             entities: {},
+            unclear: !vData.narration,
+            is_medical_verification: false,
+            medical_disclaimer: "Assistive reading only — never use as a medical verification tool.",
             speech_summary: summary
           });
-          speakText(summary);
+          speakText(summary, true);
           setIsAnalyzingVision(false);
           return;
         }
       }
 
+      const preparedInput = await preprocessImageForOCR(imageSource);
       const { createWorker } = await import('tesseract.js');
       const worker = await createWorker('eng');
-      const ret = await worker.recognize(imageSource);
+      const ret = await worker.recognize(preparedInput);
       await worker.terminate();
 
-      const extractedText = ret.data.text;
+      const extractedText = ret.data.text || '';
+      const confidence = typeof ret.data.confidence === 'number' ? ret.data.confidence : undefined;
       if (!extractedText.trim()) {
-        speakText("No clear text detected. Local OCR needs flat, well-lit, large print.");
+        const msg = "No clear text detected. Move closer to the label under brighter light, hold flat and steady, then say try again.";
+        setOcrResult({
+          full_text: '',
+          lines: [],
+          entities: {},
+          unclear: true,
+          ocr_confidence: confidence ?? 0,
+          is_medical_verification: false,
+          medical_disclaimer: "Assistive reading only — never use as a medical verification tool.",
+          speech_summary: msg,
+        });
+        speakText(msg, true);
         setIsAnalyzingVision(false);
         return;
       }
@@ -743,24 +927,92 @@ export function App() {
       const res = await fetch('/api/vision/analyze-ocr-text', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ raw_text: extractedText })
+        body: JSON.stringify({ raw_text: extractedText, confidence })
       });
 
       if (res.ok) {
         const data: OCRResponse = await res.json();
         setOcrResult(data);
-        speakText(data.speech_summary);
+        speakText(data.speech_summary, true);
+      } else {
+        const errMsg = "Text was scanned, but the backend OCR parser failed. Try again or inspect the text on screen.";
+        setVisionActionError(errMsg);
+        speakText(errMsg, true);
       }
     } catch (err: any) {
       console.error("OCR error:", err);
-      speakText("Could not complete text scan.");
+      const errMsg = "Could not complete text scan. Improve lighting, hold the label steady, and say try again.";
+      setVisionActionError(errMsg);
+      speakText(errMsg, true);
     } finally {
       setIsAnalyzingVision(false);
     }
-  };
+  }, [vlmProvider, speakText]);
+
+  useEffect(() => {
+    runDocumentOcrRef.current = runDocumentOCR;
+  }, [runDocumentOCR]);
 
   // Samvaad Live Sign Recognition & Sentence Composition
-  const captureAndAnalyzeSign = async () => {
+  const handleNewRecognizedSign = useCallback(async (gestureKey: string) => {
+    const prev = gestureSequenceRef.current;
+    const updated = prev[prev.length - 1] === gestureKey ? prev : [...prev, gestureKey];
+    const trimmed = updated.slice(-4);
+    gestureSequenceRef.current = trimmed;
+    setGestureSequence(trimmed);
+
+    try {
+      const r = await fetch('/api/sign/sequence-sentence', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ gestures: trimmed })
+      });
+      if (r.ok) {
+        const sent = await r.json();
+        setComposedSentence({ en: sent.sentence_en, hi: sent.sentence_hi });
+        speakText(`${sent.sentence_en}. Hindi: ${sent.sentence_hi}`, true);
+      } else {
+        speakText("Could not compose phrase. Please try confirming the gesture again.", true);
+      }
+    } catch (e) {
+      console.error(e);
+      speakText("Failed to connect to Samvaad server. Check backend and try again.", true);
+    }
+  }, [speakText]);
+
+  const confirmPendingSign = useCallback((signToConfirm?: SignPrediction | null) => {
+    const target = signToConfirm ?? pendingSignRef.current;
+    if (!target || !target.recognized) return;
+    setPendingSign(null);
+    void handleNewRecognizedSign(target.gesture);
+  }, [handleNewRecognizedSign]);
+
+  const discardPendingSign = useCallback(() => {
+    setPendingSign(null);
+    speakText("Gesture discarded. Show your hand gesture and try again.");
+  }, [speakText]);
+
+  const processSignPrediction = useCallback((data: SignPrediction, isContinuous: boolean) => {
+    setSignResult(data);
+    if (data.recognized && data.gesture !== 'NO_HAND' && data.gesture !== 'UNKNOWN') {
+      if (requireSignConfirmRef.current) {
+        setPendingSign(data);
+      } else {
+        setPendingSign(null);
+        void handleNewRecognizedSign(data.gesture);
+      }
+    } else {
+      setPendingSign(null);
+      const msg = data.message || 'Gesture not recognised. Please try again.';
+      const now = Date.now();
+      if (!isContinuous || now - lastSpokenUnknownSignRef.current > 4500) {
+        lastSpokenUnknownSignRef.current = now;
+        speakText(msg);
+      }
+    }
+  }, [handleNewRecognizedSign, speakText]);
+
+  const captureAndAnalyzeSign = async (isContinuous = false) => {
     if (!signVideoRef.current || !isSignCameraActive || isAnalyzingSign) return;
 
     setIsAnalyzingSign(true);
@@ -786,41 +1038,18 @@ export function App() {
 
       if (res.ok) {
         const data: SignPrediction = await res.json();
-        setSignResult(data);
         drawSignBox(data, hiddenCanvas.width, hiddenCanvas.height);
-
-        if (data.recognized && data.gesture !== 'NO_HAND') {
-          // Add to sequence queue if new
-          handleNewRecognizedSign(data.gesture);
-        }
+        processSignPrediction(data, isContinuous);
+      } else if (!isContinuous) {
+        speakText("Gesture service returned an error. Please try again.");
       }
     } catch (e) {
       console.error("Sign analysis failed", e);
+      if (!isContinuous) {
+        speakText("Could not connect to gesture detection backend. Check server and try again.");
+      }
     } finally {
       setIsAnalyzingSign(false);
-    }
-  };
-
-  const handleNewRecognizedSign = async (gestureKey: string) => {
-    const prev = gestureSequenceRef.current;
-    const updated = prev[prev.length - 1] === gestureKey ? prev : [...prev, gestureKey];
-    const trimmed = updated.slice(-4);
-    gestureSequenceRef.current = trimmed;
-    setGestureSequence(trimmed);
-
-    try {
-      const r = await fetch('/api/sign/sequence-sentence', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ gestures: trimmed })
-      });
-      if (r.ok) {
-        const sent = await r.json();
-        setComposedSentence({ en: sent.sentence_en, hi: sent.sentence_hi });
-        speakText(`${sent.sentence_en}. Hindi: ${sent.sentence_hi}`);
-      }
-    } catch (e) {
-      console.error(e);
     }
   };
 
@@ -843,12 +1072,14 @@ export function App() {
       const rw = (x2 - x1) * scaleX;
       const rh = (y2 - y1) * scaleY;
 
-      ctx.strokeStyle = '#ec4899';
+      ctx.strokeStyle = data.recognized ? '#ec4899' : '#f59e0b';
       ctx.lineWidth = 4;
       ctx.strokeRect(rx, ry, rw, rh);
 
-      const labelText = `Gesture: ${data.phrase_en} (${Math.round(data.confidence * 100)}%)`;
-      ctx.fillStyle = 'rgba(236, 72, 153, 0.9)';
+      const labelText = data.recognized
+        ? `${data.gesture}: ${data.phrase_en} (${Math.round(data.confidence * 100)}% heuristic)`
+        : 'Gesture not recognised';
+      ctx.fillStyle = data.recognized ? 'rgba(236, 72, 153, 0.9)' : 'rgba(245, 158, 11, 0.9)';
       ctx.font = '15px Inter, sans-serif';
       const textWidth = ctx.measureText(labelText).width;
       ctx.fillRect(rx, Math.max(0, ry - 28), textWidth + 14, 28);
@@ -867,15 +1098,67 @@ export function App() {
       setAutoSignTrack(true);
       speakText('Continuous gesture demo active. Hold hand clearly in front of camera.');
       signIntervalRef.current = setInterval(() => {
-        void captureAndAnalyzeSign();
+        void captureAndAnalyzeSign(true);
       }, 1200);
     }
   };
 
+  // Retry last failed or previous Drishti Vision/OCR scan
+  const retryLastVisionOp = useCallback(() => {
+    const lastOp = lastVisionOpRef.current;
+    if (lastOp?.kind === 'ocr') {
+      setDrishtiSubMode('ocr');
+      drishtiSubModeRef.current = 'ocr';
+      if (isVisionCameraActiveRef.current && visionVideoRef.current?.videoWidth) {
+        const frameUrl = captureVideoFrameDataUrl(visionVideoRef.current, 0.92);
+        if (frameUrl) {
+          void runDocumentOCR(frameUrl);
+          return;
+        }
+      }
+      if (lastOp.imageSource) {
+        void runDocumentOCR(lastOp.imageSource);
+        return;
+      }
+      pendingVisionActionRef.current = 'ocr';
+      if (activeTab === 'drishti') {
+        void startVisionCamera();
+      } else {
+        switchTab('drishti');
+      }
+      return;
+    }
+
+    const targetMode = lastOp?.kind === 'currency' ? 'currency' : 'vision';
+    setDrishtiSubMode(targetMode);
+    drishtiSubModeRef.current = targetMode === 'currency' ? 'currency' : 'vision';
+    if (isVisionCameraActiveRef.current && visionVideoRef.current?.videoWidth) {
+      void captureAndAnalyzeVision(true, lastOp?.question);
+    } else {
+      pendingVisionActionRef.current = targetMode === 'currency' ? 'currency' : 'scene';
+      if (activeTab === 'drishti') {
+        void startVisionCamera();
+      } else {
+        switchTab('drishti');
+      }
+    }
+  }, [activeTab, captureAndAnalyzeVision, runDocumentOCR, startVisionCamera, switchTab]);
+
+  const stopWhisperRecording = useCallback(() => {
+    if (whisperStopTimerRef.current) {
+      clearTimeout(whisperStopTimerRef.current);
+      whisperStopTimerRef.current = null;
+    }
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+    setIsListening(false);
+  }, []);
+
   // Shared Multilingual Voice Command Parser (English, Hindi, Marathi + Whisper phonetic variants)
   const executeVoiceCommand = (transcript: string) => {
-    const cmd = transcript.toLowerCase();
-    if (!cmd.trim()) return;
+    const cmd = transcript.toLowerCase().trim();
+    if (!cmd) return;
 
     if (!hasConsentedRef.current) {
       if (
@@ -896,65 +1179,258 @@ export function App() {
       return;
     }
 
-    if (cmd.includes('what do you see') || cmd.includes('in front') || cmd.includes('describe') || cmd.includes('kya hai') || cmd.includes('saamne') || cmd.includes('क्या है') || cmd.includes('सामने') || cmd.includes('काय आहे')) {
-      setDrishtiSubMode('vision');
-      setVisionQuestion(transcript);
-      if (activeTab !== 'drishti') {
-        if (!isVisionCameraActive) {
-          pendingVisionStartRef.current = true;
+    // Voice confirmation for Samvaad pending gesture
+    if (activeTab === 'samvaad' && pendingSignRef.current) {
+      if (
+        cmd.includes('confirm') ||
+        cmd.includes('speak') ||
+        cmd.includes('add') ||
+        cmd === 'yes' ||
+        cmd.includes('haan') ||
+        cmd.includes('हाँ') ||
+        cmd.includes('होय')
+      ) {
+        confirmPendingSign();
+        return;
+      }
+      if (
+        cmd.includes('cancel') ||
+        cmd.includes('discard') ||
+        cmd === 'no' ||
+        cmd.includes('nahi') ||
+        cmd.includes('नहीं') ||
+        cmd.includes('नाही')
+      ) {
+        discardPendingSign();
+        return;
+      }
+    }
+
+    // 1. Repeat last spoken guidance
+    if (
+      cmd.includes('repeat') ||
+      cmd.includes('say again') ||
+      cmd.includes('read again') ||
+      cmd.includes('दोहरा') ||
+      cmd.includes('फिर से बोल') ||
+      cmd.includes('पुन्हा सांग') ||
+      cmd.includes('परत सांग')
+    ) {
+      const toRepeat = lastGuidanceRef.current || voiceAnnouncement;
+      void speakText(toRepeat);
+      return;
+    }
+
+    // 2. Retry / try again
+    if (
+      cmd.includes('try again') ||
+      cmd.includes('retry') ||
+      cmd.includes('scan again') ||
+      cmd.includes('फिर से कोशिश') ||
+      cmd.includes('पुन्हा प्रयत्न')
+    ) {
+      retryLastVisionOp();
+      return;
+    }
+
+    // 3. Language switching (English, Hindi, Marathi, Tamil, Telugu, Bengali)
+    const isLangRequest =
+      cmd.includes('language') ||
+      cmd.includes('भाषा') ||
+      cmd.includes('speak in') ||
+      cmd.includes('switch to') ||
+      /\b(marathi|hindi|english|tamil|telugu|bengali)\b/.test(cmd) ||
+      cmd.includes('मराठी') ||
+      cmd.includes('हिंदी') ||
+      cmd.includes('हिन्दी');
+    if (isLangRequest) {
+      let targetCode: string | null = null;
+      let confirmMsg = '';
+      if (cmd.includes('marathi') || cmd.includes('मराठी')) {
+        targetCode = 'mr';
+        confirmMsg = 'Language changed to Marathi. मराठी भाषा निवडली आहे.';
+      } else if (cmd.includes('hindi') || cmd.includes('हिंदी') || cmd.includes('हिन्दी')) {
+        targetCode = 'hi';
+        confirmMsg = 'Language changed to Hindi. भाषा हिन्दी कर दी गई है।';
+      } else if (cmd.includes('english') || cmd.includes('अंग्रेजी') || cmd.includes('इंग्रजी')) {
+        targetCode = 'en';
+        confirmMsg = 'Language changed to English.';
+      } else if (cmd.includes('tamil')) {
+        targetCode = 'ta';
+        confirmMsg = 'Language changed to Tamil.';
+      } else if (cmd.includes('telugu')) {
+        targetCode = 'te';
+        confirmMsg = 'Language changed to Telugu.';
+      } else if (cmd.includes('bengali')) {
+        targetCode = 'bn';
+        confirmMsg = 'Language changed to Bengali.';
+      }
+      if (targetCode) {
+        setSelectedLang(targetCode);
+        selectedLangRef.current = targetCode;
+        void speakText(confirmMsg);
+        return;
+      }
+    }
+
+    // 4. Stop cameras, voice recognition, and audio
+    if (
+      cmd.includes('stop') ||
+      cmd.includes('quiet') ||
+      cmd.includes('silence') ||
+      cmd.includes('ruko') ||
+      cmd.includes('रुको') ||
+      cmd.includes('बंद') ||
+      cmd.includes('थांब')
+    ) {
+      stopVisionCamera(true);
+      stopSignCamera(true);
+      stopAllSpeech();
+      if (isListening) {
+        if (micEngine !== 'browser') {
+          stopWhisperRecording();
+        } else if (recognitionRef.current) {
+          recognitionRef.current.stop();
+          setIsListening(false);
         }
-        switchTab('drishti');
-      } else if (!isVisionCameraActive) {
-        void startVisionCamera();
-      } else {
-        void captureAndAnalyzeVision(true, transcript);
       }
-    } else if (cmd.includes('currency') || cmd.includes('rupee') || cmd.includes('note') || cmd.includes('paisa') || cmd.includes('नोट') || cmd.includes('रुपये')) {
-      switchTab('drishti');
-      setDrishtiSubMode('currency');
-      if (isVisionCameraActive) {
-        setTimeout(() => void captureAndAnalyzeVision(true), 200);
-      } else {
-        speakText('Switched to experimental currency check mode. Please verify notes by touch as well.');
+      if (!cmd.includes('quiet') && !cmd.includes('silence')) {
+        void speakText('Stopped cameras and audio.');
       }
-    } else if (cmd.includes('medicine') || cmd.includes('ocr') || cmd.includes('dawai') || cmd.includes('दवाई') || cmd.includes('पढ़ो')) {
-      switchTab('drishti');
+      return;
+    }
+
+    // 5. Read medicine label / signboard / OCR (immediately captures if camera is active, or starts + auto-captures)
+    if (
+      cmd.includes('medicine') ||
+      cmd.includes('label') ||
+      cmd.includes('ocr') ||
+      cmd.includes('read this') ||
+      cmd.includes('read text') ||
+      cmd.includes('read sign') ||
+      cmd.includes('signboard') ||
+      cmd.includes('dawai') ||
+      cmd.includes('दवाई') ||
+      cmd.includes('लेबल') ||
+      cmd.includes('औषध') ||
+      cmd.includes('वाच') ||
+      cmd.includes('पढ़')
+    ) {
       setDrishtiSubMode('ocr');
-      speakText('Switched to Medicine and Document Reader mode.');
-    } else if (cmd.includes('drishti') || cmd.includes('dristhi') || cmd.includes('dristi') || cmd.includes('dhrishti') || cmd.includes('vision') || cmd.includes('camera') || cmd.includes('eye') || cmd.includes('दृष्टि')) {
+      drishtiSubModeRef.current = 'ocr';
+      if (activeTab === 'drishti' && isVisionCameraActiveRef.current && visionVideoRef.current?.videoWidth) {
+        const frameUrl = captureVideoFrameDataUrl(visionVideoRef.current, 0.92);
+        if (frameUrl) {
+          void runDocumentOCR(frameUrl);
+          return;
+        }
+      }
+      pendingVisionActionRef.current = 'ocr';
+      if (activeTab !== 'drishti') {
+        switchTab('drishti');
+      } else if (!isVisionCameraActiveRef.current) {
+        void startVisionCamera();
+      }
+      return;
+    }
+
+    // 6. Currency mode
+    if (cmd.includes('currency') || cmd.includes('rupee') || cmd.includes('note') || cmd.includes('paisa') || cmd.includes('नोट') || cmd.includes('रुपये')) {
+      setDrishtiSubMode('currency');
+      drishtiSubModeRef.current = 'currency';
+      if (activeTab === 'drishti' && isVisionCameraActiveRef.current && visionVideoRef.current?.videoWidth) {
+        setTimeout(() => void captureAndAnalyzeVision(true), 150);
+      } else {
+        pendingVisionActionRef.current = 'currency';
+        if (activeTab !== 'drishti') {
+          switchTab('drishti');
+        } else {
+          void startVisionCamera();
+        }
+      }
+      return;
+    }
+
+    // 7. Describe scene / What do you see
+    if (
+      cmd.includes('what do you see') ||
+      cmd.includes('in front') ||
+      cmd.includes('describe') ||
+      cmd.includes('kya hai') ||
+      cmd.includes('saamne') ||
+      cmd.includes('क्या है') ||
+      cmd.includes('सामने') ||
+      cmd.includes('काय आहे') ||
+      cmd.includes('पुढे काय')
+    ) {
+      setDrishtiSubMode('vision');
+      drishtiSubModeRef.current = 'vision';
+      setVisionQuestion(transcript);
+      visionQuestionRef.current = transcript;
+      if (activeTab === 'drishti' && isVisionCameraActiveRef.current && visionVideoRef.current?.videoWidth) {
+        void captureAndAnalyzeVision(true, transcript);
+      } else {
+        pendingVisionActionRef.current = 'scene';
+        if (activeTab !== 'drishti') {
+          switchTab('drishti');
+        } else {
+          void startVisionCamera();
+        }
+      }
+      return;
+    }
+
+    // 8. Start camera directly
+    if (
+      cmd.includes('start camera') ||
+      cmd.includes('open camera') ||
+      cmd.includes('turn on camera') ||
+      cmd.includes('कैमरा चालू') ||
+      cmd.includes('कॅमेरा सुरू')
+    ) {
+      if (activeTab === 'samvaad') {
+        void startSignCamera();
+      } else {
+        if (activeTab !== 'drishti') {
+          pendingVisionActionRef.current = 'none';
+          switchTab('drishti');
+          setTimeout(() => void startVisionCamera(), 150);
+        } else if (!isVisionCameraActiveRef.current) {
+          void startVisionCamera();
+        } else {
+          void speakText('Drishti camera is already active.');
+        }
+      }
+      return;
+    }
+
+    // 9. Tab switching & UI commands
+    if (cmd.includes('drishti') || cmd.includes('dristhi') || cmd.includes('dristi') || cmd.includes('dhrishti') || cmd.includes('vision') || cmd.includes('camera') || cmd.includes('eye') || cmd.includes('दृष्टि')) {
       switchTab('drishti');
-      speakText('Opening Drishti Visual Assistant.');
+      void speakText('Opening Drishti Visual Assistant. Say start camera, what do you see, or read this medicine label.');
     } else if (cmd.includes('samvaad') || cmd.includes('samvad') || cmd.includes('samvard') || cmd.includes('sanvad') || cmd.includes('sign') || cmd.includes('hand') || cmd.includes('gesture') || cmd.includes('संवाद') || cmd.includes('इशारा')) {
       switchTab('samvaad');
-      speakText('Opening Samvaad 8-gesture speech demo.');
+      void speakText('Opening Samvaad 8-gesture speech demo.');
     } else if (cmd.includes('contrast')) {
       setHighContrast(prev => !prev);
-      speakText('Toggled high contrast mode.');
+      void speakText('Toggled high contrast mode.');
     } else if (cmd.includes('text') || cmd.includes('font') || cmd.includes('large')) {
       setLargeFont(prev => !prev);
-      speakText('Toggled large font mode.');
-    } else if (cmd.includes('stop') || cmd.includes('ruko') || cmd.includes('बंद')) {
-      stopVisionCamera();
-      stopSignCamera();
-      speakText('Stopped cameras.');
+      void speakText('Toggled large font mode.');
     } else if (cmd.includes('read') || cmd.includes('summary')) {
-      speakText('SAHAAY AI platform is active and ready.');
-    } else if (activeTab === 'drishti' && isVisionCameraActive) {
+      void speakText('SAHAAY AI is active. Say what do you see, read this medicine label, repeat, or change language to Hindi or Marathi.', true);
+    } else if (activeTab === 'drishti' && isVisionCameraActiveRef.current) {
       setVisionQuestion(transcript);
+      visionQuestionRef.current = transcript;
       void captureAndAnalyzeVision(true, transcript);
+    } else {
+      void speakText('Command not recognized. You can say: what do you see, read this medicine label, repeat, start camera, or stop.');
     }
   };
 
-  const stopWhisperRecording = () => {
-    if (whisperStopTimerRef.current) {
-      clearTimeout(whisperStopTimerRef.current);
-      whisperStopTimerRef.current = null;
-    }
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-      mediaRecorderRef.current.stop();
-    }
-    setIsListening(false);
-  };
+  useEffect(() => {
+    executeVoiceCommandRef.current = executeVoiceCommand;
+  });
 
   // Real Microphone: Sarvam AI / Whisper AI backend (default 'auto') or Browser SpeechRecognition
   const toggleListening = async () => {
@@ -972,9 +1448,9 @@ export function App() {
     setMicError(null);
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      const msg = "Microphone requires HTTPS or localhost.";
+      const msg = "Microphone requires HTTPS or localhost. On mobile over HTTP, open via HTTPS or localhost.";
       setMicError(msg);
-      speakText(msg);
+      speakText(msg, true);
       return;
     }
 
@@ -1023,16 +1499,20 @@ export function App() {
               setActiveSpeechEngine(data.engine || null);
               if (text) {
                 setVoiceTranscript(text);
-                executeVoiceCommand(text);
+                executeVoiceCommandRef.current(text);
               } else {
-                speakText("I didn't catch any speech. Please try speaking closer to the mic.");
+                speakText("I didn't catch any speech. Please speak closer to the microphone and tap Speak to SAHAAY again.");
               }
             } else {
               const errData = await res.json().catch(() => ({}));
-              setMicError(errData.detail || "Speech transcription failed.");
+              const errMsg = errData.detail || "Speech transcription failed. You can switch Engine to Browser Speech or try again.";
+              setMicError(errMsg);
+              speakText(errMsg, true);
             }
           } catch (err: any) {
-            setMicError(`Speech upload failed: ${err.message}`);
+            const errMsg = `Speech upload failed: ${err.message}. Check that the backend server is running or switch Engine to Browser Speech.`;
+            setMicError(errMsg);
+            speakText(errMsg, true);
           } finally {
             setIsTranscribing(false);
           }
@@ -1045,9 +1525,9 @@ export function App() {
           stopWhisperRecording();
         }, 6000);
       } catch {
-        const msg = "Microphone permission is blocked. Please allow microphone access in your browser.";
+        const msg = "Microphone permission is blocked. Please allow microphone access in your browser and try again.";
         setMicError(msg);
-        speakText(msg);
+        speakText(msg, true);
       }
       return;
     }
@@ -1059,15 +1539,15 @@ export function App() {
     } catch {
       const msg = "Microphone permission is blocked. Please allow microphone access in your browser.";
       setMicError(msg);
-      speakText(msg);
+      speakText(msg, true);
       return;
     }
 
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      const err = "Browser live speech is unsupported here—switch Mic Engine to Whisper AI.";
+      const err = "Browser live speech is unsupported here. Switch Mic Engine to Whisper AI or Auto.";
       setMicError(err);
-      speakText(err);
+      speakText(err, true);
       return;
     }
 
@@ -1078,26 +1558,43 @@ export function App() {
       recognition.interimResults = true;
       const langConfig = LANGUAGES.find(l => l.code === selectedLang) || LANGUAGES[0];
       recognition.lang = langConfig.speechCode;
+      lastProcessedResultIdxRef.current = -1;
 
       recognition.onstart = () => {
         setIsListening(true);
-        speakText('Browser microphone active. I am listening.');
+        speakText('Browser microphone active. Speak your command.');
       };
 
       recognition.onresult = (event: any) => {
-        let currentTranscript = '';
+        let interimDisplay = '';
         for (let i = event.resultIndex; i < event.results.length; ++i) {
-          currentTranscript += event.results[i][0].transcript;
+          const res = event.results[i];
+          const chunk = (res[0]?.transcript || '').trim();
+          if (res.isFinal) {
+            if (i > lastProcessedResultIdxRef.current && chunk) {
+              lastProcessedResultIdxRef.current = i;
+              setVoiceTranscript(chunk);
+              executeVoiceCommandRef.current(chunk);
+            }
+          } else {
+            interimDisplay += (interimDisplay ? ' ' : '') + chunk;
+          }
         }
-        setVoiceTranscript(currentTranscript);
-        executeVoiceCommand(currentTranscript);
+        if (interimDisplay) {
+          setVoiceTranscript(interimDisplay);
+        }
       };
 
       recognition.onerror = (event: any) => {
+        let msg = '';
         if (event.error === 'not-allowed') {
-          setMicError("Microphone permission denied. Allow mic access in browser.");
+          msg = "Microphone permission denied. Allow mic access in browser settings.";
         } else if (event.error !== 'no-speech') {
-          setMicError(`Voice error: ${event.error}`);
+          msg = `Voice recognition error: ${event.error}. Try switching Engine to Whisper AI.`;
+        }
+        if (msg) {
+          setMicError(msg);
+          speakText(msg, true);
         }
         setIsListening(false);
       };
@@ -1108,7 +1605,9 @@ export function App() {
 
       recognition.start();
     } catch (err: any) {
-      setMicError(`Unable to start speech recognition: ${err.message}`);
+      const msg = `Unable to start speech recognition: ${err.message}`;
+      setMicError(msg);
+      speakText(msg, true);
       setIsListening(false);
     }
   };
@@ -1125,18 +1624,21 @@ export function App() {
     }
 
     if (drishtiSubMode === 'ocr') {
-      runDocumentOCR(file);
+      void runDocumentOCR(file);
       return;
     }
 
     const formData = new FormData();
     formData.append('file', file);
-    formData.append('mode', drishtiSubMode === 'currency' ? 'currency' : 'scene');
+    const apiMode = drishtiSubMode === 'currency' ? 'currency' : 'scene';
+    formData.append('mode', apiMode);
     formData.append('language', selectedLang);
     if (visionQuestion.trim()) {
       formData.append('question', visionQuestion.trim());
     }
+    lastVisionOpRef.current = { kind: apiMode, question: visionQuestion.trim() || undefined, imageSource: file };
     setIsAnalyzingVision(true);
+    setVisionActionError(null);
 
     try {
       const res = await fetch('/api/vision/detect', {
@@ -1150,11 +1652,18 @@ export function App() {
           playSonarBeep(data.proximity_score);
         }
         if (data.narration) {
-          speakText(data.narration);
+          speakText(data.narration, true);
         }
+      } else {
+        const errMsg = `Image analysis failed with status ${res.status}. Please try another photo.`;
+        setVisionActionError(errMsg);
+        speakText(errMsg, true);
       }
     } catch (err) {
       console.error(err);
+      const errMsg = "Could not upload photo to Drishti backend. Check connection and try again.";
+      setVisionActionError(errMsg);
+      speakText(errMsg, true);
     } finally {
       setIsAnalyzingVision(false);
     }
@@ -1176,26 +1685,102 @@ export function App() {
       });
       if (res.ok) {
         const data: SignPrediction = await res.json();
-        setSignResult(data);
-        if (data.recognized && data.gesture !== 'NO_HAND') {
-          handleNewRecognizedSign(data.gesture);
-        }
+        processSignPrediction(data, false);
+      } else {
+        speakText("Gesture photo processing failed. Please try a clearer hand photo.");
       }
     } catch (err) {
       console.error(err);
+      speakText("Could not send hand photo to Samvaad backend. Check server connection.");
     } finally {
       setIsAnalyzingSign(false);
     }
   };
 
-  // Simulator for quick testing
+  const buildSampleLandmarks = (gestureKey: string) => {
+    // 21-point normalized hand landmark templates matching backend sign_service geometry
+    const pts = Array.from({ length: 21 }, () => ({ x: 0.5, y: 0.65, z: 0.0 }));
+    pts[0] = { x: 0.50, y: 0.85, z: 0.0 }; // wrist
+    pts[1] = { x: 0.44, y: 0.78, z: 0.0 };
+    pts[2] = { x: 0.40, y: 0.72, z: 0.0 };
+    pts[3] = { x: 0.36, y: 0.64, z: 0.0 };
+    pts[4] = { x: 0.44, y: 0.66, z: 0.0 }; // tucked thumb default
+
+    pts[5] = { x: 0.42, y: 0.55, z: 0.0 }; // index MCP
+    pts[6] = { x: 0.42, y: 0.45, z: 0.0 };
+    pts[7] = { x: 0.42, y: 0.53, z: 0.0 };
+    pts[8] = { x: 0.42, y: 0.62, z: 0.0 }; // curled index default
+
+    pts[9] = { x: 0.50, y: 0.55, z: 0.0 }; // middle MCP
+    pts[10] = { x: 0.50, y: 0.44, z: 0.0 };
+    pts[11] = { x: 0.50, y: 0.53, z: 0.0 };
+    pts[12] = { x: 0.50, y: 0.62, z: 0.0 };
+
+    pts[13] = { x: 0.58, y: 0.56, z: 0.0 }; // ring MCP
+    pts[14] = { x: 0.58, y: 0.46, z: 0.0 };
+    pts[15] = { x: 0.58, y: 0.54, z: 0.0 };
+    pts[16] = { x: 0.58, y: 0.62, z: 0.0 };
+
+    pts[17] = { x: 0.65, y: 0.58, z: 0.0 }; // pinky MCP
+    pts[18] = { x: 0.65, y: 0.50, z: 0.0 };
+    pts[19] = { x: 0.65, y: 0.56, z: 0.0 };
+    pts[20] = { x: 0.65, y: 0.64, z: 0.0 };
+
+    const setThumbOut = () => {
+      pts[4] = { x: 0.22, y: 0.38, z: 0.0 };
+    };
+    const setIndexUp = () => {
+      pts[7] = { x: 0.42, y: 0.35, z: 0.0 };
+      pts[8] = { x: 0.42, y: 0.25, z: 0.0 };
+    };
+    const setMiddleUp = () => {
+      pts[11] = { x: 0.50, y: 0.33, z: 0.0 };
+      pts[12] = { x: 0.50, y: 0.22, z: 0.0 };
+    };
+    const setRingUp = () => {
+      pts[15] = { x: 0.58, y: 0.35, z: 0.0 };
+      pts[16] = { x: 0.58, y: 0.25, z: 0.0 };
+    };
+    const setPinkyUp = () => {
+      pts[19] = { x: 0.65, y: 0.40, z: 0.0 };
+      pts[20] = { x: 0.65, y: 0.30, z: 0.0 };
+    };
+
+    if (gestureKey === 'GOOD') {
+      setThumbOut();
+    } else if (gestureKey === 'NO') {
+      setIndexUp();
+    } else if (gestureKey === 'THANK_YOU') {
+      setIndexUp();
+      setMiddleUp();
+    } else if (gestureKey === 'HELP') {
+      setThumbOut();
+      setIndexUp();
+    } else if (gestureKey === 'WATER') {
+      setIndexUp();
+      setMiddleUp();
+      setRingUp();
+    } else if (gestureKey === 'NAMASTE') {
+      setIndexUp();
+      setMiddleUp();
+      setRingUp();
+      setPinkyUp();
+    } else if (gestureKey === 'STOP') {
+      setThumbOut();
+      setIndexUp();
+      setMiddleUp();
+      setRingUp();
+      setPinkyUp();
+    } else if (gestureKey === 'UNSUPPORTED') {
+      setPinkyUp(); // Unsupported single-pinky pose must return UNKNOWN
+    }
+    return pts;
+  };
+
+  // Simulator for quick testing of all 8 sample gestures + unsupported pose check
   const testSimGesture = async (gestureKey: string) => {
     setSelectedSimGesture(gestureKey);
-    const mockLandmarks = Array.from({ length: 21 }, (_, i) => ({
-      x: 0.5,
-      y: gestureKey === 'GOOD' ? (i === 4 ? 0.2 : 0.8) : 0.4,
-      z: 0.0
-    }));
+    const mockLandmarks = buildSampleLandmarks(gestureKey);
 
     try {
       const res = await fetch('/api/sign/predict', {
@@ -1205,11 +1790,13 @@ export function App() {
       });
       if (res.ok) {
         const data: SignPrediction = await res.json();
-        setSignResult(data);
-        handleNewRecognizedSign(gestureKey);
+        processSignPrediction(data, false);
+      } else {
+        speakText("Landmark test request failed.");
       }
     } catch (err) {
       console.error(err);
+      speakText("Could not connect to Samvaad backend.");
     }
   };
 
@@ -1714,7 +2301,7 @@ export function App() {
               )}
 
               {/* OCR Limitation Notice */}
-              {drishtiSubMode === 'ocr' && !vlmProvider && (
+              {drishtiSubMode === 'ocr' && (
                 <div
                   role="note"
                   style={{
@@ -1725,7 +2312,10 @@ export function App() {
                     fontSize: '0.85rem'
                   }}
                 >
-                  <strong>OCR Notice:</strong> Running local Tesseract.js OCR (no VLM key set). Works best on large, flat, well-lit text; small print (like prices or foil strips) may misread—always inspect raw lines below.
+                  <strong>Assistive OCR Notice:</strong>{' '}
+                  {vlmProvider
+                    ? 'Using configured VLM for printed text & labels. Never treat AI readings as medical verification.'
+                    : `Running local Tesseract.js OCR (English 'eng' print only${selectedLang !== 'en' ? '; set GEMINI_API_KEY for Hindi/Marathi OCR' : ''}). Works best on large, flat, well-lit text—never use unclear readings as medical verification.`}
                 </div>
               )}
 
@@ -1737,12 +2327,20 @@ export function App() {
                 </div>
               )}
 
+              {/* Action / Network Error Alert */}
+              {visionActionError && (
+                <div role="alert" style={{ padding: '0.75rem 1.5rem', background: 'rgba(239, 68, 68, 0.14)', borderBottom: '1px solid #ef4444', color: '#fecaca', fontSize: '0.88rem' }}>
+                  <AlertTriangle size={16} style={{ verticalAlign: 'middle', marginRight: '6px' }} />
+                  {visionActionError}
+                </div>
+              )}
+
               {/* Video Viewport */}
               <div className="video-view-wrapper">
                 {visionResult?.obstacle_alert && (
                   <div className="obstacle-alert-banner">
                     <AlertTriangle size={18} />
-                    <span>CAUTION: Close Obstacle Detected!</span>
+                    <span>Close Visual Object Cue (Experimental — rely on your cane)</span>
                   </div>
                 )}
 
@@ -1768,8 +2366,8 @@ export function App() {
                     </p>
                     <p style={{ fontSize: '0.9rem', color: 'var(--text-muted)', marginTop: '0.35rem', maxWidth: '480px', margin: '0.35rem auto 0' }}>
                       {drishtiSubMode === 'ocr' 
-                        ? 'Hold medicine box, prescription, or grocery item in front of your camera, or tap "Scan Medicine Photo".' 
-                        : 'Click "Start Camera" for live video, or tap "Take Phone Camera Photo" below.'}
+                        ? 'Say "Read this medicine label" or tap "Snap Medicine Photo" below.' 
+                        : 'Say "Start camera" or "What do you see?", or tap "Take Phone Camera Photo" below.'}
                     </p>
                   </div>
                 )}
@@ -1783,24 +2381,38 @@ export function App() {
                 </div>
               )}
 
+              {/* OCR Unclear Warning */}
+              {ocrResult?.unclear && (
+                <div role="alert" style={{ padding: '0.7rem 1.5rem', background: 'rgba(245, 158, 11, 0.16)', borderTop: '1px solid rgba(245, 158, 11, 0.45)', color: '#fde68a', fontSize: '0.85rem' }}>
+                  <strong>Unclear Text Warning: </strong>
+                  <span>Label text appears blurry or low-confidence{ocrResult.ocr_confidence != null ? ` (${ocrResult.ocr_confidence}%)` : ''}. Move closer in brighter light and say &quot;Try again&quot;. Do not guess medicine details.</span>
+                </div>
+              )}
+
               {/* OCR Entity Highlights Bar */}
               {ocrResult?.entities && (
                 <div className="entity-cards-container">
                   {ocrResult.entities.dosage && (
                     <div className="entity-pill-card">
-                      <div className="entity-label">Dosage Detected</div>
+                      <div className="entity-label">Dosage Text</div>
                       <div className="entity-value">{ocrResult.entities.dosage}</div>
                     </div>
                   )}
                   {ocrResult.entities.expiry && (
                     <div className="entity-pill-card">
-                      <div className="entity-label">Expiry Date</div>
+                      <div className="entity-label">Expiry Text</div>
                       <div className="entity-value">{ocrResult.entities.expiry}</div>
+                    </div>
+                  )}
+                  {ocrResult.entities.mfg && (
+                    <div className="entity-pill-card">
+                      <div className="entity-label">Mfg Date Text</div>
+                      <div className="entity-value">{ocrResult.entities.mfg}</div>
                     </div>
                   )}
                   {ocrResult.entities.price && (
                     <div className="entity-pill-card">
-                      <div className="entity-label">Price</div>
+                      <div className="entity-label">Price Text</div>
                       <div className="entity-value">{ocrResult.entities.price}</div>
                     </div>
                   )}
@@ -1816,7 +2428,7 @@ export function App() {
               {/* Raw OCR Text Verification Box */}
               {ocrResult?.full_text && (
                 <div style={{ padding: '0.75rem 1.75rem', background: 'rgba(255,255,255,0.03)', borderTop: '1px solid var(--border-color)', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                  <strong>Raw Scanned Text: </strong>
+                  <strong>Raw Scanned Text{ocrResult.ocr_confidence != null ? ` (OCR ${ocrResult.ocr_confidence}%)` : ''}: </strong>
                   <span style={{ fontFamily: 'monospace' }}>{ocrResult.full_text}</span>
                 </div>
               )}
@@ -1868,17 +2480,10 @@ export function App() {
                       className="primary-voice-btn" 
                       onClick={() => {
                         if (drishtiSubMode === 'ocr' && visionVideoRef.current) {
-                          const v = visionVideoRef.current;
-                          const c = document.createElement('canvas');
-                          c.width = v.videoWidth;
-                          c.height = v.videoHeight;
-                          const cx = c.getContext('2d');
-                          if (cx) {
-                            cx.drawImage(v, 0, 0);
-                            runDocumentOCR(c.toDataURL('image/jpeg'));
-                          }
+                          const frameUrl = captureVideoFrameDataUrl(visionVideoRef.current, 0.92);
+                          if (frameUrl) void runDocumentOCR(frameUrl);
                         } else {
-                          captureAndAnalyzeVision(true);
+                          void captureAndAnalyzeVision(true);
                         }
                       }}
                       disabled={isAnalyzingVision}
@@ -1912,10 +2517,29 @@ export function App() {
                     className={`icon-btn ${isListening ? 'active' : ''}`}
                     onClick={toggleListening}
                     disabled={isTranscribing}
-                    title="Ask Drishti by voice using Whisper AI"
+                    title="Speak commands: 'What do you see', 'Read this medicine label', 'Repeat', 'Change language to Marathi'"
                   >
                     {isListening ? <MicOff size={16} /> : <Mic size={16} />}
                     <span>{isTranscribing ? "Transcribing..." : isListening ? "Stop & Send" : "Ask by Voice"}</span>
+                  </button>
+
+                  <button
+                    className="icon-btn"
+                    onClick={() => void speakText(lastGuidanceRef.current || voiceAnnouncement)}
+                    title="Repeat last spoken result (or say 'Repeat')"
+                  >
+                    <Volume2 size={16} />
+                    <span>Repeat</span>
+                  </button>
+
+                  <button
+                    className="icon-btn"
+                    onClick={retryLastVisionOp}
+                    disabled={isAnalyzingVision}
+                    title="Retry last scan (or say 'Try again')"
+                  >
+                    <RotateCcw size={16} />
+                    <span>Try Again</span>
                   </button>
                 </div>
 
@@ -1938,11 +2562,24 @@ export function App() {
                   <HandMetal size={24} color="#ec4899" />
                   <div>
                     <h2 style={{ fontSize: '1.25rem', fontWeight: 700 }}>Samvaad Gesture-to-Speech Demo</h2>
-                    <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>8 Sample Hand Gestures via OpenCV Contour Finger-Counting (Not Full ISL)</div>
+                    <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>8 Sample Hand Gestures via OpenCV Contour &amp; Landmark Heuristics (Not Full ISL)</div>
                   </div>
                 </div>
 
                 <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                  <button
+                    className={`icon-btn ${requireSignConfirm ? 'active' : ''}`}
+                    onClick={() => {
+                      const next = !requireSignConfirm;
+                      setRequireSignConfirm(next);
+                      speakText(next ? 'Confirmation before speaking turned on.' : 'Confirmation before speaking turned off.');
+                    }}
+                    title="Show recognized gesture text and require confirmation before speaking"
+                  >
+                    <CheckCircle2 size={16} />
+                    <span>Confirm Before Speak: {requireSignConfirm ? 'ON' : 'OFF'}</span>
+                  </button>
+
                   {isSignCameraActive && (
                     <button className="icon-btn" onClick={flipSignCamera} title="Flip Front / Back Camera">
                       <SwitchCamera size={18} />
@@ -1975,7 +2612,7 @@ export function App() {
                   fontSize: '0.85rem'
                 }}
               >
-                <strong>Demo Scope Notice:</strong> This is a gesture-to-speech prototype recognizing 8 simple sample hand poses (open palm, V-sign, fist, etc.) via OpenCV contour defects—it is not full Indian Sign Language (ISL) grammar.
+                <strong>Demo Scope Notice:</strong> This is a gesture-to-speech prototype recognizing 8 static sample poses via OpenCV/landmark heuristics—it is not full Indian Sign Language (ISL) translation, which requires grammar, movement, and facial expressions.
               </div>
 
               {/* Sign Camera Error Alert */}
@@ -2003,17 +2640,67 @@ export function App() {
                     <HandMetal size={48} style={{ opacity: 0.3, marginBottom: '1rem', color: '#ec4899' }} />
                     <p style={{ fontSize: '1.1rem', fontWeight: 600 }}>Hand Sign Camera is currently off</p>
                     <p style={{ fontSize: '0.9rem', color: 'var(--text-muted)', marginTop: '0.35rem', maxWidth: '480px', margin: '0.35rem auto 0' }}>
-                      Click <strong>"Start Hand Camera"</strong> or tap <strong>"Snap Hand Photo with Phone"</strong> to record gestures and compose sentences.
+                      Click <strong>&quot;Start Hand Camera&quot;</strong> or tap <strong>&quot;Snap Hand Photo with Phone&quot;</strong> to detect one of the 8 sample poses.
                     </p>
                   </div>
                 )}
               </div>
 
+              {/* Confirmation Step Banner before Speaking */}
+              {pendingSign && (
+                <div
+                  role="region"
+                  aria-label="Confirm detected gesture before speaking"
+                  style={{
+                    padding: '1rem 1.5rem',
+                    background: 'rgba(16, 185, 129, 0.12)',
+                    borderTop: '1px solid rgba(16, 185, 129, 0.45)',
+                    borderBottom: '1px solid rgba(16, 185, 129, 0.45)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    flexWrap: 'wrap',
+                    gap: '0.75rem',
+                  }}
+                >
+                  <div>
+                    <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#6ee7b7', textTransform: 'uppercase' }}>
+                      Confirm Detected Gesture Before Speaking
+                    </div>
+                    <div style={{ fontSize: '1.1rem', fontWeight: 700, color: '#fff', marginTop: '0.15rem' }}>
+                      {pendingSign.gesture} — &quot;{pendingSign.phrase_en}&quot; / {pendingSign.phrase_hi}
+                    </div>
+                    <div style={{ fontSize: '0.82rem', color: '#cbd5e1' }}>
+                      Heuristic match score: {Math.round(pendingSign.confidence * 100)}% (threshold {Math.round((pendingSign.threshold ?? 0.6) * 100)}%)
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    <button
+                      type="button"
+                      className="icon-btn active"
+                      onClick={() => confirmPendingSign(pendingSign)}
+                      style={{ background: '#16a34a', borderColor: '#22c55e', color: '#fff', fontWeight: 700 }}
+                    >
+                      <CheckCircle2 size={16} />
+                      <span>Confirm &amp; Speak</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      onClick={discardPendingSign}
+                    >
+                      <Trash2 size={16} />
+                      <span>Discard</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* Gesture Sequence Breadcrumbs */}
               {gestureSequence.length > 0 && (
                 <div className="sentence-queue-bar">
                   <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginRight: '0.25rem' }}>
-                    Signed Sequence:
+                    Confirmed Sequence:
                   </span>
                   {gestureSequence.map((g, idx) => (
                     <React.Fragment key={idx}>
@@ -2027,6 +2714,7 @@ export function App() {
                       gestureSequenceRef.current = [];
                       setGestureSequence([]);
                       setComposedSentence(null);
+                      setPendingSign(null);
                       speakText("Gesture sequence reset.");
                     }}
                     style={{ marginLeft: 'auto', padding: '0.25rem 0.5rem', fontSize: '0.75rem' }}
@@ -2041,26 +2729,35 @@ export function App() {
               {/* Continuous Assembled Sentence Banner */}
               <div style={{ padding: '1.75rem', textAlign: 'center', background: 'rgba(236, 72, 153, 0.05)', borderBottom: '1px solid var(--border-color)' }}>
                 <span style={{ fontSize: '0.85rem', color: '#f472b6', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 700 }}>
-                  Detected Gesture Output
+                  {signResult && !signResult.recognized ? 'Unrecognized / Low-Confidence Pose' : 'Confirmed Gesture Output'}
                 </span>
                 <h3 style={{ fontSize: '2.25rem', fontWeight: 800, marginTop: '0.35rem', color: '#fff' }}>
-                  {composedSentence?.hi || signResult?.phrase_hi || "कोई हाथ का इशारा दिखाएँ"}
+                  {signResult && !signResult.recognized
+                    ? signResult.phrase_hi
+                    : (composedSentence?.hi || signResult?.phrase_hi || "कोई हाथ का इशारा दिखाएँ")}
                 </h3>
-                <p style={{ fontSize: '1.25rem', color: 'var(--accent-cyan)', marginTop: '0.25rem', fontWeight: 600 }}>
-                  "{composedSentence?.en || signResult?.phrase_en || "Show a hand gesture or tap a sample below"}"
+                <p style={{ fontSize: '1.25rem', color: signResult && !signResult.recognized ? '#fbbf24' : 'var(--accent-cyan)', marginTop: '0.25rem', fontWeight: 600 }}>
+                  &quot;{signResult && !signResult.recognized
+                    ? (signResult.message || signResult.phrase_en)
+                    : (composedSentence?.en || signResult?.phrase_en || "Show a hand gesture or tap a sample below")}&quot;
                 </p>
+                {signResult && (
+                  <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.35rem' }}>
+                    Label: {signResult.gesture} • Heuristic score: {Math.round(signResult.confidence * 100)}% ({signResult.score_type || 'heuristic'})
+                  </div>
+                )}
 
                 <div style={{ marginTop: '1rem', display: 'flex', justifyContent: 'center', gap: '0.75rem' }}>
                   <button 
                     className="icon-btn"
-                    onClick={() => speakText(composedSentence?.en || signResult?.phrase_en || "Show a hand gesture")}
+                    onClick={() => speakText(composedSentence?.en || signResult?.phrase_en || "Show a hand gesture", true)}
                   >
                     <Volume2 size={18} />
                     <span>Pronounce English</span>
                   </button>
                   <button 
                     className="icon-btn"
-                    onClick={() => speakText(composedSentence?.hi || signResult?.phrase_hi || "कोई हाथ का इशारा दिखाएँ")}
+                    onClick={() => speakText(composedSentence?.hi || signResult?.phrase_hi || "कोई हाथ का इशारा दिखाएँ", true)}
                   >
                     <Volume2 size={18} />
                     <span>Pronounce Hindi</span>
@@ -2075,12 +2772,12 @@ export function App() {
                     <>
                       <button 
                         className="primary-voice-btn" 
-                        onClick={captureAndAnalyzeSign}
+                        onClick={() => void captureAndAnalyzeSign(false)}
                         disabled={isAnalyzingSign}
                         style={{ padding: '0.6rem 1.25rem', fontSize: '0.95rem' }}
                       >
                         <Play size={16} />
-                        <span>{isAnalyzingSign ? "Reading Hand..." : "Add Gesture to Sentence"}</span>
+                        <span>{isAnalyzingSign ? "Reading Hand..." : "Detect Gesture"}</span>
                       </button>
 
                       <button 
@@ -2089,7 +2786,7 @@ export function App() {
                         style={{ padding: '0.6rem 1.25rem' }}
                       >
                         <RotateCcw size={16} className={autoSignTrack ? 'spin' : ''} />
-                        <span>{autoSignTrack ? "Stop Continuous Read" : "Live Auto-Sentence"}</span>
+                        <span>{autoSignTrack ? "Stop Continuous Read" : "Live Auto-Read"}</span>
                       </button>
                     </>
                   )}
@@ -2117,18 +2814,19 @@ export function App() {
 
               {/* Quick Test Simulator */}
               <div style={{ padding: '1.25rem 1.5rem 0.5rem', fontWeight: 600, fontSize: '0.95rem' }}>
-                Tap to Test Sample Gesture Pairs (e.g. NAMASTE + HELP, or WATER + HELP):
+                Test 8 Sample Landmark Poses + Unsupported Pose Check (via <code>/api/sign/predict</code>):
               </div>
               <div className="vocab-cards-grid">
                 {[
-                  { key: 'NAMASTE', hi: 'नमस्ते', en: 'Namaste / Hello' },
-                  { key: 'HELP', hi: 'मदद', en: 'I Need Help' },
-                  { key: 'WATER', hi: 'पानी', en: 'Water Please' },
-                  { key: 'THANK_YOU', hi: 'धन्यवाद', en: 'Thank You' },
-                  { key: 'YES', hi: 'हाँ', en: 'Yes / Agreed' },
-                  { key: 'NO', hi: 'नहीं', en: 'No / Disagree' },
-                  { key: 'GOOD', hi: 'बहुत अच्छा', en: 'Good / Super' },
-                  { key: 'STOP', hi: 'रुकिए', en: 'Stop / Wait' },
+                  { key: 'NAMASTE', hi: 'नमस्ते (4 fingers)', en: 'Namaste / Hello' },
+                  { key: 'HELP', hi: 'मदद (L-sign)', en: 'I Need Help' },
+                  { key: 'WATER', hi: 'पानी (W-sign)', en: 'Water Please' },
+                  { key: 'THANK_YOU', hi: 'धन्यवाद (V-sign)', en: 'Thank You' },
+                  { key: 'YES', hi: 'हाँ (Fist)', en: 'Yes / Agreed' },
+                  { key: 'NO', hi: 'नहीं (Index)', en: 'No / Disagree' },
+                  { key: 'GOOD', hi: 'बहुत अच्छा (Thumb)', en: 'Good / Super' },
+                  { key: 'STOP', hi: 'रुकिए (5 fingers)', en: 'Stop / Wait' },
+                  { key: 'UNSUPPORTED', hi: 'अज्ञात टेस्ट (Pinky)', en: 'Test Unsupported Pose' },
                 ].map(item => (
                   <div 
                     key={item.key} 

@@ -1,0 +1,4 @@
+project-includes = ["backend", "ml"]
+project-excludes = ["**/.venv/**", "**/node_modules/**", "**/__pycache__/**"]
+search-path = ["backend", "."]
+python-version = "3.12"

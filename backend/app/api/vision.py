@@ -14,6 +14,7 @@ class Base64ImageRequest(BaseModel):
 
 class OCRTextRequest(BaseModel):
     raw_text: str
+    confidence: Optional[float] = None
 
 @router.get("/status")
 def get_vision_status():
@@ -58,4 +59,4 @@ async def detect_from_base64(payload: Base64ImageRequest):
 @router.post("/analyze-ocr-text")
 def analyze_ocr(payload: OCRTextRequest):
     """Analyze OCR text from documents or medicine labels and extract critical entities."""
-    return vision_service.analyze_document_text(payload.raw_text)
+    return vision_service.analyze_document_text(payload.raw_text, ocr_confidence=payload.confidence)

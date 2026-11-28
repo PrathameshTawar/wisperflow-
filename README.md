@@ -4,18 +4,25 @@ A voice-first accessibility prototype built for blind, low-vision, and speech-im
 
 ## Primary Flow: Drishti (दृष्टि) — Voice-First Visual Assistant
 
-- **Ask & Hear What It Sees:** Point your laptop or phone camera and hear continuous spoken descriptions every ~5.5 seconds, or ask spoken questions (*"What is in front of me?"*, *"Is there a door?"*).
+- **Voice-First Hands-Free Commands (English, Hindi, Marathi):**
+  - *"What do you see?"* / *"क्या है?"* / *"काय आहे?"* — opens Drishti (if needed), starts camera, and immediately captures & describes the scene.
+  - *"Read this medicine label"* / *"Read this label"* / *"दवाई पढ़ो"* / *"औषध वाच"* — switches to OCR mode and automatically captures & scans the current frame without touching the screen.
+  - *"Repeat"* / *"Repeat that"* / *"दोहराओ"* / *"पुन्हा सांग"* — repeats the last spoken vision or OCR guidance aloud.
+  - *"Try again"* / *"Retry"* — repeats the last failed or previous vision/OCR scan.
+  - *"Change language to Marathi / Hindi / English"* — switches UI/TTS language and confirms aloud.
+  - *"Start camera"* / *"Stop"* — starts camera or stops active cameras and audio playback; commands run only on finalized speech transcripts (never half-spoken interim text), and errors are spoken aloud with recovery hints.
 - **Dual Vision Engine:**
   - **Vision-Language Model (Recommended):** Supports **Google Gemini (`gemini-2.5-flash`)** or **Anthropic Claude (`claude-sonnet-4-5`)** when `GEMINI_API_KEY` / `ANTHROPIC_API_KEY` is set in `backend/.env` for full scene, signboard, door, and stair descriptions.
   - **Local Offline Fallback (`YOLOv8n`):** Runs locally when no VLM key is configured (limited to 80 COCO object classes).
-- **Qualitative Distance Only:** Reports spatial sectors (`on your left`, `directly ahead`, `on your right`) and qualitative proximity (`very close`, `nearby`, `far`) paired with optional Web Audio sonar pulses. **Never guesses exact distances in meters or feet.**
-- **Label & Medicine Reader (OCR):** Uses VLM when configured, or on-device **Tesseract.js** OCR fallback with entity parsing (dosage, expiry date, MRP, warnings) and raw scanned text display.
+- **Experimental Spatial & Proximity Cues:** Reports spatial sectors (`on your left`, `directly ahead`, `on your right`) and approximate size-based closeness (`very close`, `nearby`, `far`) paired with optional Web Audio sonar pulses. Bounding-box area is an experimental visual cue—**never physical distance in meters/feet, and never a claim that a path is clear or safe.**
+- **Label & Medicine Reader (OCR):** Uses VLM when configured, or on-device **Tesseract.js** (`eng` with contrast-stretch preprocessing) fallback. Reads raw extracted text aloud **before** structured highlights (`dosage`, `expiry`, `mfg`, `price`, `warning`), flags blurry/low-confidence (`<45%`) text as **unclear** instead of guessing, separates `Mfg` from `Exp`, and explicitly states it is **not a medical verification tool**.
 - **Currency Reader (Experimental):** Optional color-heuristic INR note check (`₹10`–`₹500`) explicitly marked experimental—never intended as a sole check for financial transactions.
 
 ## Secondary Prototype: Samvaad (संवाद) — Gesture-to-Speech Demo (8 Sample Gestures)
 
-- **Scope & Honesty:** This is an **8-gesture demo prototype**—it is **not** full Indian Sign Language (ISL) grammar recognition and does **not** use MediaPipe.
-- **How It Works:** Uses **OpenCV** (`YCrCb` skin segmentation + convex hull finger-counting) to classify 8 sample hand poses (*Namaste/Hello, Thank You, Help, Water, Yes, No, Good, Stop*) into bilingual Hindi and English speech, plus a sample gesture-pair phrase builder.
+- **Scope & Honesty:** This is an **8-gesture demo prototype**—it is **not** complete Indian Sign Language (ISL) translation (real ISL includes grammar, movement, facial expressions, and context) and does **not** use MediaPipe.
+- **How It Works:** Uses **OpenCV** (`YCrCb` skin segmentation + convex hull defect count/angle/solidity/aspect ratio) and a 21-point landmark endpoint (`/api/sign/predict`) to distinguish 8 static sample poses (*Namaste/Hello, Thank You, Help, Water, Yes, No, Good, Stop*).
+- **Safety & Confirmation:** Uses computed geometric heuristic scores with a `0.60` confidence threshold, returns **`UNKNOWN` (`"Gesture not recognised. Please try again."`)** for unsupported or low-confidence poses (never defaulting to `HELP`), and defaults to **Confirm Before Speak** (showing the recognized gesture as text before converting it to speech).
 
 ## Multilingual Voice Pipeline
 
@@ -33,12 +40,15 @@ Measured locally on this Windows workstation (`Python 3.12.10`, CPU mode):
 
 | Component | Measured Result | Notes |
 | :--- | :--- | :--- |
-| **Backend Test Suite (`pytest -v`)** | **11 / 11 passed** (`9.75s`) | API routes, OCR entity parser, qualitative distance guard, 400 error guards, no false-positive currency/face checks |
-| **Frontend Build (`tsc -b && vite build`)** | **0 errors** (`1.02s`) | Production TypeScript + Vite bundle |
-| **YOLOv8n Local Inference Latency (`640×480`)** | **129.6 ms median** (`161.5 ms` p95) | Speed-only benchmark (`ml/evaluation/benchmark.py`) on CPU; covers 80 COCO classes |
-| **Tesseract.js OCR (generated test PNGs)** | **594 ms** on 34pt label; tiny 10px print misread `Rs. 45.00` as `Fs 4500` | Synthetic test only — real medicine strip photo testing in progress via `ml/evaluation/scene_eval_log.csv` |
+| **Backend Test Suite (`pytest -v`)** | **15 / 15 passed** (`6.03s`) | API routes, all 8 Samvaad poses (landmarks + synthetic silhouettes) + `UNKNOWN` rejection, OCR uncertainty & `Mfg`/`Exp` separation, safety guards, 400 upload guards, CORS origin restriction |
+| **Frontend Lint (`npm run lint`)** | **0 warnings, 0 errors** (`716ms`) | `oxlint` across 3 files / 116 rules |
+| **Frontend Build (`npm run build`)** | **0 errors** (`717ms`) | `tsc -b && vite build` (2,152 modules) |
+| **YOLOv8n Local Inference Latency (`640×480`)** | **47.5 ms median** (`47.9 ms` p95) | Synthetic speed benchmark (`ml/evaluation/benchmark.py`) on CPU; covers 80 COCO classes |
+| **OpenCV Gesture Contour Pipeline (`640×480`)** | **6.3 ms median** | Synthetic speed check (`ml/evaluation/benchmark.py`); rejects smooth skin oval as `NO_HAND` |
+| **OCR Entity & Uncertainty Parser** | **1.56 ms** | Clear medicine text parsed; low-confidence (`28%`) text flagged `unclear=True` |
+| **Speech Pipeline (`faster-whisper-base`, 2s silent WAV)** | **19.1 ms median** | Local CPU execution benchmark (`ml/evaluation/benchmark.py`); does not measure word error rate |
 
-*Field Evaluation (In Progress):* Logging 10 real camera scenes (desk, door, person, chair, bottle, signboard, medicine strip, etc.) in [`ml/evaluation/scene_eval_log.csv`](ml/evaluation/scene_eval_log.csv) alongside user feedback from 3–5 testers.
+*Pending Field & User Evaluation (Not Yet Measured):* Real-camera 10-scene accuracy ([`ml/evaluation/scene_eval_log.csv`](ml/evaluation/scene_eval_log.csv)), real medicine-strip photo OCR trials, live spoken-command recognition across Hindi/Marathi/English, repeated real-hand Samvaad trials across lighting/backgrounds, and usability feedback from 3–5 participants (including people with visual or hearing impairments) remain next steps requiring live hardware and human testers.
 
 ## Safety & Limitations
 

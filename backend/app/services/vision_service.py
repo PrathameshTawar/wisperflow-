@@ -2,6 +2,7 @@ import base64
 import io
 import os
 import re
+from pathlib import Path
 import cv2
 import httpx
 import numpy as np
@@ -24,9 +25,10 @@ Look at this camera frame and answer the user's request concisely so it can be r
 Strict safety & honesty rules:
 1. Describe what you clearly see: people, furniture, doors, stairs, signboards, printed labels, vehicles, or general surroundings.
 2. Describe positions using ONLY 'on your left', 'directly ahead', or 'on your right'.
-3. Describe closeness using ONLY 'very close', 'nearby', or 'far'. NEVER guess distances in meters or feet.
+3. Describe closeness using ONLY 'very close', 'nearby', or 'far', and frame it as approximate visual cues — NEVER guess distances in meters or feet.
 4. NEVER claim a path is 'clear' or 'safe' — you cannot reliably detect potholes, glass doors, or fast-moving hazards.
 5. If the image is blurry, too dark, or unreadable, say so honestly instead of guessing.
+6. For medicine labels or printed documents: read the visible text first, state clearly if a medicine name, dosage, or expiry date is blurry or unreadable instead of guessing, and never present this as a medical verification tool.
 {question_line}"""
 
 class VisionService:
@@ -37,8 +39,21 @@ class VisionService:
     def _init_model(self):
         """Loads lightweight YOLOv8n model (80 COCO classes) for local detection."""
         try:
+            import tempfile
+            if not os.environ.get("YOLO_CONFIG_DIR"):
+                appdata = os.environ.get("APPDATA", "")
+                if appdata:
+                    cfg_file = Path(appdata) / "Ultralytics" / "settings.json"
+                    try:
+                        cfg_file.parent.mkdir(parents=True, exist_ok=True)
+                        with open(cfg_file, "a", encoding="utf-8"):
+                            pass
+                    except OSError:
+                        os.environ["YOLO_CONFIG_DIR"] = str(Path(tempfile.gettempdir()) / "sahaay_ultralytics")
             from ultralytics import YOLO
-            self.model = YOLO("yolov8n.pt")
+            backend_weights = Path(__file__).resolve().parent.parent.parent / "yolov8n.pt"
+            model_ref = str(backend_weights) if backend_weights.exists() else "yolov8n.pt"
+            self.model = YOLO(model_ref)
             print("Drishti: YOLOv8n model initialized successfully.")
         except Exception as e:
             print(f"Drishti: YOLO model notice: {e}")
@@ -285,6 +300,8 @@ class VisionService:
             "detections": detections,
             "obstacle_alert": any(d.get("is_obstacle") and d.get("proximity") == "very close" for d in detections),
             "proximity_score": round(max_proximity_score, 2),
+            "proximity_experimental": True,
+            "proximity_note": "Experimental size-based visual cue only; never a physical distance measurement or mobility guarantee.",
             "narration": narration,
             "vision_engine": vision_engine,
             "vlm_error": vlm_error,
@@ -365,45 +382,90 @@ class VisionService:
             }
         return None
 
-    def analyze_document_text(self, raw_text: str) -> Dict[str, Any]:
-        """Extracts medical and document entities from OCR text."""
+    def analyze_document_text(self, raw_text: str, ocr_confidence: Optional[float] = None) -> Dict[str, Any]:
+        """
+        Extracts medical and document entities from OCR text without guessing unclear fields.
+        Reads raw extracted text first, then highlights detected fields with uncertainty warnings.
+        """
         lines = [line.strip() for line in raw_text.split("\n") if line.strip()]
+        alnum_count = sum(ch.isalnum() for ch in raw_text)
+        low_confidence = ocr_confidence is not None and ocr_confidence < 45.0
+        is_unclear = (alnum_count < 3) or low_confidence
 
-        expiry_match = re.search(r'(exp(?:iry)?\.?|mfg\.?|use by)[:.\s]*([0-9]{1,2}[\/\-\.][0-9]{2,4})', raw_text, re.IGNORECASE)
-        dosage_match = re.search(r'([0-9]+(?:\.[0-9]+)?\s*(?:mg|ml|g|tablets?|capsules?))', raw_text, re.IGNORECASE)
-        price_match = re.search(r'(?:rs\.?|inr|₹)\s*([0-9]+(?:\.[0-9]{2})?)', raw_text, re.IGNORECASE)
+        expiry_match = re.search(
+            r'(exp(?:iry)?\.?|use by|best before)[:.\s]*([0-9]{1,2}[\/\-\.][0-9]{2,4})',
+            raw_text,
+            re.IGNORECASE,
+        )
+        mfg_match = re.search(
+            r'(mfg\.?|mfd\.?)[:.\s]*([0-9]{1,2}[\/\-\.][0-9]{2,4})',
+            raw_text,
+            re.IGNORECASE,
+        )
+        dosage_match = re.search(
+            r'([0-9]+(?:\.[0-9]+)?\s*(?:mg|ml|mcg|g|tablets?|capsules?))',
+            raw_text,
+            re.IGNORECASE,
+        )
+        price_match = re.search(r'(?:rs\.?|inr|mrp\.?|₹)\s*([0-9]+(?:\.[0-9]{1,2})?)', raw_text, re.IGNORECASE)
         warning_match = re.search(r'(caution|warning|schedule [a-z]|keep out of reach).*', raw_text, re.IGNORECASE)
 
-        entities = {}
-        if expiry_match:
-            entities["expiry"] = expiry_match.group(0)
-        if dosage_match:
-            entities["dosage"] = dosage_match.group(0)
-        if price_match:
-            entities["price"] = f"₹{price_match.group(1)}"
-        if warning_match:
-            entities["warning"] = warning_match.group(0)
+        entities: Dict[str, str] = {}
+        if not is_unclear:
+            if expiry_match:
+                entities["expiry"] = expiry_match.group(0)
+            if mfg_match:
+                entities["mfg"] = mfg_match.group(0)
+            if dosage_match:
+                entities["dosage"] = dosage_match.group(0)
+            if price_match:
+                entities["price"] = f"₹{price_match.group(1)}"
+            if warning_match:
+                entities["warning"] = warning_match.group(0)
 
-        narration_parts = []
-        if "dosage" in entities:
-            narration_parts.append(f"Dosage identified: {entities['dosage']}.")
-        if "expiry" in entities:
-            narration_parts.append(f"Expiry date: {entities['expiry']}.")
-        if "warning" in entities:
-            narration_parts.append(f"Notice: {entities['warning']}.")
-        if "price" in entities:
-            narration_parts.append(f"Price: {entities['price']}.")
+        preview = " ".join(lines[:4])[:220] if lines else ""
+        has_medical_cues = bool(
+            entities.get("dosage")
+            or entities.get("expiry")
+            or entities.get("warning")
+            or re.search(r'\b(tablet|capsule|syrup|medicine|rx|paracetamol|dose|pharma)\b', raw_text, re.IGNORECASE)
+        )
 
-        if not narration_parts:
-            preview = " ".join(lines[:3]) if lines else "No clear text found."
-            speech_summary = f"Read from document: {preview}"
+        if is_unclear:
+            speech_summary = (
+                "The label text is unclear or blurry. Move closer in brighter light, hold steady, "
+                "and say try again. Do not guess or use unclear text for medical verification."
+            )
+            if preview:
+                speech_summary = f"Unclear partial text: {preview}. " + speech_summary
         else:
-            speech_summary = " ".join(narration_parts)
+            parts = [f"Text read: {preview}."]
+            if "dosage" in entities:
+                parts.append(f"Dosage text: {entities['dosage']}.")
+            elif has_medical_cues:
+                parts.append("Dosage was not clearly detected.")
+            if "expiry" in entities:
+                parts.append(f"Expiry text: {entities['expiry']}.")
+            elif has_medical_cues:
+                parts.append("Expiry date was not clearly detected.")
+            if "warning" in entities:
+                parts.append(f"Warning text: {entities['warning']}.")
+            if "price" in entities:
+                parts.append(f"Price text: {entities['price']}.")
+
+            if ocr_confidence is not None and ocr_confidence < 70.0:
+                parts.append("Some characters had moderate OCR confidence; verify important details carefully.")
+            parts.append("Assistive reading only, not a medical verification tool.")
+            speech_summary = " ".join(parts)
 
         return {
             "full_text": raw_text,
             "lines": lines,
             "entities": entities,
+            "unclear": is_unclear,
+            "ocr_confidence": round(float(ocr_confidence), 1) if ocr_confidence is not None else None,
+            "is_medical_verification": False,
+            "medical_disclaimer": "Assistive reading only — never use as a medical verification tool.",
             "speech_summary": speech_summary
         }
 
@@ -423,11 +485,11 @@ class VisionService:
             label = d["label"]
             pos = d["position"]
             if d["proximity"] == "very close":
-                descriptions.append(f"a {label} {pos}, very close")
+                descriptions.append(f"a {label} {pos}, appearing very close by size")
             elif d["proximity"] == "nearby":
-                descriptions.append(f"a {label} {pos}, nearby")
+                descriptions.append(f"a {label} {pos}, appearing nearby")
             else:
-                descriptions.append(f"a {label} {pos}, far")
+                descriptions.append(f"a {label} {pos}, appearing far")
 
         if len(descriptions) == 1:
             text = f"I see {descriptions[0]}."

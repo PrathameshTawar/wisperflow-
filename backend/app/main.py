@@ -9,13 +9,13 @@ app = FastAPI(
     description="Backend API for SAHAAY AI — Multilingual Voice-First Accessibility Platform"
 )
 
-# CORS Middleware setup - allow all origins for local Wi-Fi and mobile access
+# Restrict CORS to explicit allowed origins (configured via CORS_ORIGINS)
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=".*",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=settings.CORS_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 # Include API Router

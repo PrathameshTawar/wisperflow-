@@ -45,9 +45,8 @@ def make_test_wav_bytes(seconds: float = 2.0) -> bytes:
 def benchmark_vision(runs: int = 10):
     img_bytes = make_test_scene_bytes()
     # Warmup
-    vision_service.analyze_frame(img_bytes, mode="scene")
+    last_res = vision_service.analyze_frame(img_bytes, mode="scene")
     times = []
-    last_res = None
     for _ in range(runs):
         t0 = time.perf_counter()
         last_res = vision_service.analyze_frame(img_bytes, mode="scene")
@@ -60,9 +59,8 @@ def benchmark_vision(runs: int = 10):
 
 
 def benchmark_gesture(runs: int = 10):
-    # Synthetic frame with a skin-toned blob in center
+    # Synthetic frame with a smooth skin-toned oval (no finger texture -> should reject)
     frame = np.zeros((480, 640, 3), dtype=np.uint8)
-    # RGB approximate skin tone (215, 165, 130)
     img = Image.fromarray(frame)
     draw = ImageDraw.Draw(img)
     draw.ellipse((240, 140, 400, 340), fill=(215, 165, 130))
@@ -71,7 +69,7 @@ def benchmark_gesture(runs: int = 10):
     img_bytes = buf.getvalue()
 
     times = []
-    last_res = None
+    last_res = sign_service.predict_from_image(img_bytes)
     for _ in range(runs):
         t0 = time.perf_counter()
         last_res = sign_service.predict_from_image(img_bytes)
@@ -83,12 +81,26 @@ def benchmark_gesture(runs: int = 10):
     }
 
 
+def benchmark_ocr_parser():
+    t0 = time.perf_counter()
+    clear_res = vision_service.analyze_document_text(
+        "Paracetamol 500mg\nExp: 08/2027\nCaution: Take after food",
+        ocr_confidence=88.0,
+    )
+    blur_res = vision_service.analyze_document_text("Prcm 500", ocr_confidence=28.0)
+    elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+    return {
+        "clear_ok": (not clear_res["unclear"]) and ("500mg" in clear_res["entities"].get("dosage", "")),
+        "blur_rejected": blur_res["unclear"] is True,
+        "elapsed_ms": elapsed_ms,
+    }
+
+
 def benchmark_speech(runs: int = 3):
     wav_bytes = make_test_wav_bytes(2.0)
     # Warmup model load
-    speech_service.transcribe_audio(wav_bytes, language="en", engine="whisper")
+    last_res = speech_service.transcribe_audio(wav_bytes, language="en", engine="whisper")
     times = []
-    last_res = None
     for _ in range(runs):
         t0 = time.perf_counter()
         last_res = speech_service.transcribe_audio(wav_bytes, language="en", engine="whisper")
@@ -100,13 +112,15 @@ def benchmark_speech(runs: int = 3):
 
 
 def main():
-    print("Running SAHAAY AI local benchmarks...")
+    print("Running SAHAAY AI local benchmarks (synthetic inputs, CPU mode)...")
     v = benchmark_vision()
     g = benchmark_gesture()
+    o = benchmark_ocr_parser()
     s = benchmark_speech()
     print(f"Vision ({v['engine']}): median={v['median_ms']} ms, p95={v['p95_ms']} ms")
-    print(f"Gesture Demo (OpenCV): median={g['median_ms']} ms, synthetic_blob={g['gesture']}")
-    print(f"Speech ({s['engine']} on 2s clip): median={s['median_ms']} ms")
+    print(f"Gesture Demo (OpenCV): median={g['median_ms']} ms, smooth_blob_result={g['gesture']}")
+    print(f"OCR Parser: elapsed={o['elapsed_ms']} ms, clear_ok={o['clear_ok']}, blur_rejected={o['blur_rejected']}")
+    print(f"Speech ({s['engine']} on 2s silent clip): median={s['median_ms']} ms")
 
 
 if __name__ == "__main__":
